@@ -1,0 +1,10 @@
+{
+  "car_count": 3,
+  "slot_count": 8,
+  "dt": 0.1,
+  "speed_mps": 3.0,
+  "acceleration_mps2": 1.5,
+  "braking_mps2": 2.0,
+  "sensor_range_m": 15.0,
+  "heartbeat_timeout_s": 1.0
+}
