@@ -1,14 +1,16 @@
-# Gyári parkolás – kis oktatási változat
+# Gyári járműparkolás – Ipar 4.0
 
-Szimulált járművek parkolóhely-kiosztása, útvonalkövetése és megállítása egy gyárudvari zebra előtt. A projekt a nagyobb [gyári parkolási demonstrátor](https://github.com/JackYHUN/ipar4-gyari-parkolas) külön, kisebb változata.
+Gyárudvari járműparkolás determinisztikus szimulációja központi parkolóhely-kiosztással, virtuális gyalogosészleléssel és hibakezeléssel. A járművek a gyártósor kijáratától egy lefoglalt parkolóhelyig haladnak; az útjukat keresztező zebránál a szimulált érzékelés alapján megállnak, majd továbbindulnak.
 
-## A jelenlegi közzététel tartalma
+## Működés és a kódtár tartalma
 
-Ez az első közzététel a **determinisztikus modellt, alapkonfigurációját és tíz hálózat nélküli modelltesztet** tartalmazza. A teljes helyi alkalmazás MQTT-futtatókörnyezete, műszerfala és integrációs tesztjei még nem részei ennek a repositorynak. A forrás ezeket említő megjegyzései a teljes helyi alkalmazásra utalnak.
+A járműmodell parkolóhelyet kér, a koordinátor lefoglalja az első szabad helyet, majd visszaadja az oda vezető útvonalat. A modell követi a mozgást, a virtuális érzékelő állapotát és a parkolás visszaigazolását. A futásazonosító, a kérésazonosító és a sorszámok segítik a hibás vagy korábbi parancsok kiszűrését.
+
+A kódtár jelenleg a **determinisztikus modellt, alapkonfigurációját és tíz hálózat nélküli modelltesztet** tartalmazza. A helyi alkalmazás MQTT-futtatókörnyezete, műszerfala és integrációs tesztjei még nincsenek feltöltve. A forrás ezeket említő megjegyzései a helyi alkalmazásra utalnak.
 
 A modell `World.step()` és `Coordinator.handle()` metódusai `(topic, payload)` üzenetpárokat adnak vissza. A most közzétett tesztek közvetlen függvényhívásokkal továbbítják ezeket; ez a változat önmagában még nem bizonyít működő MQTT-adatutat.
 
-A kód AI segítségével készült. A commitok a közzététel tényleges idejét rögzítik; önmagukban nem igazolják az önálló hallgatói munkát.
+A projekt AI-közreműködéssel fejlesztett oktatási szimuláció.
 
 ## Ellenőrzés
 
@@ -39,5 +41,3 @@ Ezek funkcionális modelltesztek; nem statisztikai mérési kampány és nem val
 | `mini_yard/model.py` | Járműállapotgép, mozgás, virtuális érzékelés és parkolókoordinátor |
 | `config.json` | A helyi alkalmazás alapkonfigurációja; a tesztek a modell azonos alapértékeit használják |
 | `tests/test_model.py` | Tíz standard library `unittest` eset |
-
-Az első snapshot a már meglévő helyi modell közzététele; nem újonnan, a feltöltés napján elvégzett teljes fejlesztés.
