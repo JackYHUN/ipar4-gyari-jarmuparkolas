@@ -1,0 +1,50 @@
+@startuml
+title Kis gyári parkolási demonstrátor – komponensek és rendszerhatár
+left to right direction
+skinparam componentStyle rectangle
+skinparam shadowing false
+
+actor "Kezelő / hallgató" as user
+
+rectangle "Helyi oktatási demonstrátor rendszerhatára" {
+  package "Járműoldali szimuláció" {
+    component "Folyamatmodell\nautó, út, zebra, parkoló" as process
+    component "Virtuális érzékelő\ngyalogosjel, távolság, érvényesség" as sensor
+    component "Járműállapotgép\nmozgás és megállás\nWorld MQTT-kliens" as vehicle
+    component "Valós órás\nszívverés-felügyelet" as watchdog
+  }
+
+  queue "MQTT-közvetítő\nTCP 19085" as broker
+  component "Parkolókoordinátor\nhelyek és foglalások\nCoordinator MQTT-kliens" as coordinator
+  component "Megfigyelő\nObserver MQTT-kliens" as observer
+  database "Fogadott MQTT-üzenetek\nJSONL; CSV / eseményexport" as log
+  component "HTTP API és műszerfal\n127.0.0.1:8766" as ui
+
+  process --> sensor : modellbeli környezet
+  sensor --> vehicle : virtuális érzékelés
+  vehicle --> process : sebesség / megállás
+  vehicle --> broker : helyigény, kézi elhelyezési igény,\ntelemetria, esemény, világállapot
+  broker --> vehicle : helyfoglalási / elhelyezési parancs
+  coordinator --> broker : kiosztás, állapot, szívverés
+  broker --> coordinator : helyigény, kézi elhelyezés,\nparkolási esemény
+  broker --> watchdog : fogadott szívverés
+  watchdog --> vehicle : kapcsolat érvényessége
+  broker --> observer : világ, koordinátor, telemetria, esemény
+  observer --> log : teljes fogadott forgalom
+  observer --> ui : megfigyelt állapot
+  ui --> vehicle : hibainjektálás / futásvezérlés /\nmár parkoló autó elhelyezési kérése
+}
+
+user --> ui : indítás, megfigyelés, export
+note bottom of process
+  A fizikai világot szoftveres modell képviseli.
+  Nincs valódi jármű vagy kalibrált szenzor.
+  Egyszerre legfeljebb egy autó mozog.
+  A kézzel elhelyezett autók álló háttérjárművek;
+  foglaltságuk nem feladatteljesítés.
+end note
+note bottom of ui
+  Az állapotkijelzés MQTT-megfigyelésből épül.
+  A kezelői beavatkozás külön HTTP-vezérlés.
+end note
+@enduml

@@ -1,0 +1,46 @@
+@startuml
+title Egy szimulált autó egyszerűsített UML-állapotgépe
+hide empty description
+skinparam shadowing false
+
+state "Várakozás\nwaiting" as waiting
+state "Helyigénylés\nrequesting" as requesting
+state "Haladás\ndriving" as driving
+state "Gyalogos miatti megállás\npedestrian_stop" as pedestrian_stop
+state "Kommunikáció miatti megállás\ncommunication_stop" as communication_stop
+state "Érzékelőhiba miatti megállás\nsensor_stop" as sensor_stop
+state "Leparkolt\nparked" as parked
+
+[*] --> waiting
+waiting --> requesting : sorra kerül / MQTT-helyigény
+requesting --> requesting : nincs szabad hely / várakozás és újrakérés
+requesting --> driving : érvényes futás-, autó- és kérésazonosítójú kiosztás
+driving --> pedestrian_stop : zebra előtt aktív gyalogosjel
+pedestrian_stop --> driving : gyalogos távozott; többi feltétel megfelelő
+driving --> communication_stop : szívverés elavult
+communication_stop --> driving : kapcsolat helyreállt; többi feltétel megfelelő
+driving --> sensor_stop : érzékelőjel érvénytelen
+sensor_stop --> driving : érzékelőjel helyreállt; többi feltétel megfelelő
+driving --> parked : útvonal vége / parkolási esemény MQTT-n
+parked --> [*]
+
+note right of driving
+  Egyszerű gyorsulás és fékezés,
+  ideális útvonalkövetés.
+  Az állapot megállási okot is jelöl;
+  a sebességet külön kell megfigyelni.
+end note
+note bottom of communication_stop
+  A diagram a fő átmeneteket mutatja.
+  Több egyidejű tiltásnál a modell
+  feltétel-kiértékelése választ megállási okot;
+  feloldáskor a többi feltétel is ellenőrzendő.
+end note
+note bottom of parked
+  Ebben a változatban nincs távozás.
+  A parkolóhely foglalt marad.
+  A kézzel elhelyezett háttérjárművek külön
+  parked_cars listában, eleve parkolva jelennek meg;
+  nem járják be ezt a mozgási állapotgépet.
+end note
+@enduml

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 import math
+import re
 
 
 DEFAULT_CONFIG = {
@@ -88,6 +89,8 @@ class World(_Producer):
                      for i in range(self.config["car_count"])]
         self.pedestrian = self.sensor_failure = False
         self.active = None
+        self.parked_cars = []
+        self._parking_setup = {}
         self.pedestrian_stops = 0
         self._events = []
 
@@ -119,7 +122,11 @@ class World(_Producer):
 
     def handle_command(self, topic, payload):
         """Érvényes, aktuális foglalás fogadása; hibás JSON-adat nem állítja le a modellt."""
-        if not self._valid_envelope(payload) or self.active is None:
+        if not self._valid_envelope(payload):
+            return False
+        if topic == "commands/parking_setup":
+            return self._handle_parking_setup(payload)
+        if self.active is None:
             return False
         car = self.cars[self.active]
         if (topic != "commands/" + car["id"] or payload.get("car_id") != car["id"]
@@ -144,6 +151,60 @@ class World(_Producer):
                     request_id=car["request_id"])
         return True
 
+    def request_parked_car(self, slot_id, request_id):
+        """Kezdeti foglaltság módosításának kérése; a döntést a koordinátor hozza."""
+        if (not isinstance(slot_id, str) or re.fullmatch(r"P[0-9]{2}", slot_id) is None
+                or not isinstance(request_id, str) or not request_id or len(request_id) > 160):
+            raise ValueError("Hibás parkolóhely- vagy kérésazonosító")
+        existing = self._parking_setup.get(request_id)
+        if existing is not None and existing["slot_id"] != slot_id:
+            raise ValueError("A kérésazonosító már másik parkolóhelyhez tartozik")
+        if existing is None:
+            if len(self._parking_setup) >= 256:
+                raise ValueError("A futás parkolóbeállítási kéréskerete betelt; indíts új futást")
+            self._parking_setup[request_id] = {"slot_id": slot_id, "seq": 0, "kind": None}
+        return self._emit("requests/parking_setup", {
+            "request_id": request_id, "slot_id": slot_id, "car_id": "PARK-" + slot_id})
+
+    def _handle_parking_setup(self, payload):
+        request_id = payload.get("request_id")
+        if not isinstance(request_id, str):
+            return False
+        pending = self._parking_setup.get(request_id)
+        kind, slot_id = payload.get("kind"), payload.get("slot_id")
+        if (pending is None or pending["slot_id"] != slot_id
+                or payload["seq"] <= pending["seq"]
+                or kind not in ("parked_spawned", "parking_setup_rejected")
+                or payload.get("car_id") != "PARK-" + slot_id
+                or not isinstance(payload.get("message"), str)
+                or (pending["kind"] is not None and kind != pending["kind"])):
+            return False
+        if kind == "parked_spawned":
+            slot = next((s for s in self.slots if s["id"] == slot_id), None)
+            if (slot is None or any(payload.get(key) != value for key, value in
+                                    (("x", slot["x"]), ("y", slot["y"]), ("heading", -90)))
+                    or (slot["state"] != "free" and not
+                        (slot["state"] == "occupied" and slot["car_id"] == payload["car_id"]))):
+                return False
+            if not any(car["id"] == payload["car_id"] for car in self.parked_cars):
+                self.parked_cars.append({"id": payload["car_id"], "car_id": payload["car_id"],
+                                         "slot_id": slot_id, "x": slot["x"], "y": slot["y"],
+                                         "heading": -90, "state": "parked", "origin": "preparked"})
+                slot.update(state="occupied", car_id=payload["car_id"], reservation_id=None)
+                self._event(kind, message=payload["message"], car_id=payload["car_id"],
+                            slot_id=slot_id, request_id=payload["request_id"])
+        elif pending["kind"] is None:
+            self._event(kind, message=payload["message"], car_id=payload["car_id"],
+                        slot_id=slot_id, request_id=payload["request_id"])
+        pending.update(seq=payload["seq"], kind=kind)
+        return True
+
+    def flush_events(self):
+        """A szüneteltetett modell kezelői eseményeit is naplózhatóvá teszi."""
+        messages = [self._emit("events", event) for event in self._events]
+        self._events.clear()
+        return messages
+
     def _sensor(self, car):
         approaching = car["_segment"] == 1 and car["state"] != "waiting" and car["x"] <= 32
         visible = approaching and 0 <= 30 - car["x"] <= self.config["sensor_range_m"]
@@ -159,9 +220,11 @@ class World(_Producer):
         slots = deepcopy(self.slots)
         return {"run_id": self.run_id, "seq": self.seq, "sim_time": round(self.sim_time, 6),
                 "cars": [self._car_view(c) for c in self.cars], "slots": slots,
+                "parked_cars": deepcopy(self.parked_cars),
                 "crossing": {"active": self.pedestrian, "x": 30, "y": 28},
                 "metrics": {"completed": sum(c["state"] == "parked" for c in self.cars),
-                            "total": len(self.cars), "pedestrian_stops": self.pedestrian_stops,
+                            "total": len(self.cars), "preparked": len(self.parked_cars),
+                            "pedestrian_stops": self.pedestrian_stops,
                             "distance_m": round(sum(c["distance_m"] for c in self.cars), 3)},
                 "map": {"width": 64, "height": 38,
                         "road": [[8, 28], [56, 28], [56, 14], [14, 14]],
@@ -243,8 +306,7 @@ class World(_Producer):
                     and (car["x"], car["y"]) == position_before):
                 reason = _STOP_REASONS[car["state"]]
                 car["stop_time_s"][reason] = round(car["stop_time_s"][reason] + dt, 9)
-        messages.extend(self._emit("events", event) for event in self._events)
-        self._events.clear()
+        messages.extend(self.flush_events())
         messages.extend(self._emit("telemetry/" + car["id"], self._car_view(car)) for car in self.cars)
         messages.append(self._emit("world", self.snapshot()))
         return messages
@@ -259,13 +321,19 @@ class Coordinator(_Producer):
         self.reservations = {}
         self._car_ids = {f"CAR{i + 1:02d}" for i in range(self.config["car_count"])}
         self._last_request = {}
+        self._parking_setup = {}
+        self._last_setup_seq = 0
 
     def snapshot(self):
         return {"run_id": self.run_id, "seq": self.seq, "sim_time": round(self.sim_time, 6),
                 "slots": deepcopy(self.slots), "reservations": deepcopy(list(self.reservations.values()))}
 
     def handle(self, topic, payload):
-        if (not self._valid_envelope(payload) or not isinstance(payload.get("car_id"), str)
+        if not self._valid_envelope(payload):
+            return []
+        if topic == "requests/parking_setup":
+            return self._handle_parking_setup(payload)
+        if (not isinstance(payload.get("car_id"), str)
                 or payload["car_id"] not in self._car_ids):
             return []
         car_id, request_id = payload["car_id"], payload.get("request_id")
@@ -307,3 +375,36 @@ class Coordinator(_Producer):
         return [self._emit("commands/" + car_id, {
             "kind": "parking_grant", **reservation, "route": _route(slot)}),
             self._emit("coordinator", self.snapshot())]
+
+    def _handle_parking_setup(self, payload):
+        request_id, slot_id = payload.get("request_id"), payload.get("slot_id")
+        if (not isinstance(request_id, str) or not request_id or len(request_id) > 160
+                or not isinstance(slot_id, str) or re.fullmatch(r"P[0-9]{2}", slot_id) is None
+                or payload.get("car_id") != "PARK-" + slot_id):
+            return []
+        self.sim_time = max(self.sim_time, payload["sim_time"])
+        result = {"kind": "parking_setup_rejected", "request_id": request_id,
+                  "slot_id": slot_id, "car_id": "PARK-" + slot_id}
+        existing = self._parking_setup.get(request_id)
+        if existing is not None:
+            result = (existing if existing["slot_id"] == slot_id else
+                      result | {"message": "A kérésazonosító már másik parkolóhelyhez tartozik."})
+        else:
+            slot = next((s for s in self.slots if s["id"] == slot_id), None)
+            if payload["seq"] <= self._last_setup_seq:
+                result["message"] = "Elavult parkolóbeállítási kérés."
+            elif len(self._parking_setup) >= 256:
+                result["message"] = "A futás kéréskerete betelt; indíts új futást."
+            elif slot is None:
+                result["message"] = "Ismeretlen parkolóhely."
+            elif slot["state"] != "free":
+                result["message"] = "A parkolóhely foglalt vagy már le van foglalva."
+            else:
+                slot.update(state="occupied", car_id=result["car_id"], reservation_id=None)
+                result.update(kind="parked_spawned", x=slot["x"], y=slot["y"], heading=-90,
+                              message="A már parkoló jármű bekerült a foglaltsági nyilvántartásba.")
+            self._last_setup_seq = max(self._last_setup_seq, payload["seq"])
+            if len(self._parking_setup) < 256:
+                self._parking_setup[request_id] = deepcopy(result)
+        return [self._emit("commands/parking_setup", result),
+                self._emit("coordinator", self.snapshot())]

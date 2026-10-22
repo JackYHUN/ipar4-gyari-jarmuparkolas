@@ -202,6 +202,102 @@ class ModelTests(unittest.TestCase):
         fresh = World(DEFAULT_CONFIG, "new-run")
         self.assertTrue(all(sum(c["stop_time_s"].values()) == 0 for c in fresh.cars))
 
+    def place_parked(self, slot_id="P01", request_id="setup-one"):
+        topic, request = self.world.request_parked_car(slot_id, request_id)
+        replies = self.coordinator.handle(topic, request)
+        for command_topic, payload in replies:
+            self.world.handle_command(command_topic, payload)
+        return request, replies[0][1]
+
+    def test_preparked_car_is_separate_from_moving_fleet_and_preserves_counts(self):
+        _, ack = self.place_parked()
+        self.assertEqual(ack["kind"], "parked_spawned")
+        snap = self.world.snapshot()
+        self.assertEqual(snap["metrics"]["completed"], 0)
+        self.assertEqual(snap["metrics"]["total"], 3)
+        self.assertEqual(snap["metrics"]["preparked"], 1)
+        self.assertEqual(snap["sim_time"], 0)
+        self.assertEqual(snap["parked_cars"], [{"id": "PARK-P01", "car_id": "PARK-P01",
+            "slot_id": "P01", "x": 14, "y": 7, "heading": -90, "state": "parked", "origin": "preparked"}])
+        self.assertEqual(self.coordinator.slots[0]["state"], "occupied")
+        self.assertEqual(self.coordinator.reservations, {})
+        snap["parked_cars"][0]["x"] = 999
+        self.assertEqual(self.world.snapshot()["parked_cars"][0]["x"], 14)
+        events = self.world.flush_events()
+        self.assertEqual(events[0][1]["type"], "parked_spawned")
+        self.assertEqual(events[0][1]["car_id"], "PARK-P01")
+
+    def test_preparked_repeat_is_idempotent_and_conflicting_reuse_is_rejected(self):
+        request, ack = self.place_parked()
+        self.assertFalse(self.world.handle_command("commands/parking_setup", ack))
+        repeated = self.coordinator.handle("requests/parking_setup", request)[0][1]
+        self.assertTrue(self.world.handle_command("commands/parking_setup", repeated))
+        self.assertEqual(len(self.world.parked_cars), 1)
+        self.assertEqual(len(self.world.flush_events()), 1)
+        conflict = request | {"slot_id": "P02", "car_id": "PARK-P02", "seq": request["seq"] + 1}
+        rejected = self.coordinator.handle("requests/parking_setup", conflict)[0][1]
+        self.assertEqual(rejected["kind"], "parking_setup_rejected")
+        self.assertEqual(self.coordinator.slots[1]["state"], "free")
+        with self.assertRaises(ValueError):
+            self.world.request_parked_car("P02", "setup-one")
+
+    def test_moving_cars_skip_preparked_slot_and_complete_original_work(self):
+        self.place_parked()
+        self.tick(1300)
+        snap = self.world.snapshot()
+        self.assertEqual([car["slot_id"] for car in snap["cars"]], ["P02", "P03", "P04"])
+        self.assertEqual((snap["metrics"]["completed"], snap["metrics"]["total"]), (3, 3))
+        self.assertEqual(len(self.coordinator.reservations), 3)
+        self.assertEqual(sum(s["state"] == "occupied" for s in self.coordinator.slots), 4)
+
+    def test_setup_rejects_occupied_reserved_and_unknown_slots_without_reassignment(self):
+        self.place_parked()
+        self.deliver()
+        self.assertEqual(self.coordinator.slots[1]["state"], "reserved")
+        for slot in ("P01", "P02", "P99"):
+            with self.subTest(slot=slot):
+                _, reply = self.place_parked(slot, "reject-" + slot)
+                self.assertEqual(reply["kind"], "parking_setup_rejected")
+        self.assertEqual(len(self.world.parked_cars), 1)
+        self.assertEqual(self.coordinator.slots[1]["car_id"], "CAR01")
+        self.assertEqual(len(self.coordinator.reservations), 1)
+
+    def test_setup_commands_require_current_pending_identity_sequence_and_fixed_pose(self):
+        request = self.world.request_parked_car("P01", "setup-valid")[1]
+        ack = self.coordinator.handle("requests/parking_setup", request)[0][1]
+        for key, value in (("run_id", "old-run"), ("request_id", "unknown"), ("request_id", []),
+                           ("slot_id", "P02"), ("car_id", "CAR01"), ("seq", 0),
+                           ("x", 15), ("y", 28), ("heading", 0)):
+            with self.subTest(key=key):
+                self.assertFalse(self.world.handle_command("commands/parking_setup", ack | {key: value}))
+        self.assertEqual(self.world.parked_cars, [])
+        self.assertTrue(self.world.handle_command("commands/parking_setup", ack))
+        self.assertFalse(self.world.handle_command("commands/parking_setup", ack))
+
+    def test_setup_requests_reject_stale_envelopes_without_occupying_extra_places(self):
+        request, _ = self.place_parked()
+        invalid = [request | {"run_id": "old-run"}, request | {"request_id": []},
+                   request | {"car_id": "CAR01"}, request | {"slot_id": "P-1"}]
+        for payload in invalid:
+            self.assertEqual(self.coordinator.handle("requests/parking_setup", payload), [])
+        stale = request | {"request_id": "older", "slot_id": "P02", "car_id": "PARK-P02"}
+        reply = self.coordinator.handle("requests/parking_setup", stale)[0][1]
+        self.assertEqual(reply["kind"], "parking_setup_rejected")
+        self.assertEqual(self.coordinator.slots[1]["state"], "free")
+
+    def test_full_preparked_capacity_blocks_requests_and_new_run_clears_setup(self):
+        self.world = World({"slot_count": 1}, "test-run")
+        self.coordinator = Coordinator({"slot_count": 1}, "test-run")
+        self.place_parked()
+        self.tick(30)
+        self.assertEqual(self.world.cars[0]["state"], "requesting")
+        self.assertIsNone(self.world.cars[0]["slot_id"])
+        self.assertEqual(self.world.snapshot()["metrics"]["completed"], 0)
+        fresh = World({"slot_count": 1}, "next-run")
+        self.assertEqual(fresh.snapshot()["parked_cars"], [])
+        self.assertEqual(fresh.slots[0]["state"], "free")
+        self.assertEqual(Coordinator({"slot_count": 1}, "next-run").reservations, {})
+
 
 if __name__ == "__main__":
     unittest.main()
