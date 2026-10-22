@@ -13,8 +13,8 @@ class ModelTests(unittest.TestCase):
         self.world = World(DEFAULT_CONFIG, "test-run")
         self.coordinator = Coordinator(DEFAULT_CONFIG, "test-run")
 
-    def deliver(self, connected=True):
-        messages = self.world.step(0.1, connected=connected)
+    def deliver(self, connected=True, dt=0.1):
+        messages = self.world.step(dt, connected=connected)
         for topic, data in messages:
             for command_topic, command in self.coordinator.handle(topic, data):
                 self.world.handle_command(command_topic, command)
@@ -143,6 +143,64 @@ class ModelTests(unittest.TestCase):
         world.step(0.1)
         self.assertEqual((world.cars[0]["x"], world.cars[0]["y"]), (8, 28))
         self.assertEqual(world.cars[0]["distance_m"], 0)
+
+    def test_stop_times_use_model_seconds_and_do_not_double_count_faults(self):
+        self.tick(30)
+        car = self.world.cars[0]
+        self.world.control("sensor_failure", {"active": True})
+        self.tick(5, dt=0.05)
+        self.assertEqual(car["stop_time_s"],
+                         {"pedestrian": 0.0, "sensor_failure": 0.25, "communication": 0.0})
+        self.tick(4, dt=0.025, connected=False)
+        self.assertEqual(car["stop_time_s"],
+                         {"pedestrian": 0.0, "sensor_failure": 0.25, "communication": 0.1})
+        self.world.control("sensor_failure", {"active": False})
+        self.tick(10)
+        self.assertEqual(sum(car["stop_time_s"].values()), 0.35)
+        self.assertGreater(car["speed"], 0)
+        self.assertTrue(all(sum(c["stop_time_s"].values()) == 0 for c in self.world.cars[1:]))
+
+    def test_pedestrian_stop_time_excludes_last_moving_tick_and_freezes_on_release(self):
+        self.world.control("pedestrian", {"active": True})
+        car = self.world.cars[0]
+        for _ in range(300):
+            position = car["x"], car["y"]
+            self.deliver()
+            if car["state"] == "pedestrian_stop":
+                self.assertNotEqual((car["x"], car["y"]), position)
+                break
+        else:
+            self.fail("Az autó nem állt meg a zebránál.")
+        self.assertEqual(car["stop_time_s"]["pedestrian"], 0)
+        self.tick(5)
+        self.assertEqual(car["stop_time_s"]["pedestrian"], 0.5)
+        self.world.control("pedestrian", {"active": False})
+        self.tick(10)
+        self.assertEqual(car["stop_time_s"]["pedestrian"], 0.5)
+        self.assertGreater(car["speed"], 0)
+
+    def test_waiting_requesting_and_parked_time_is_not_a_protective_stop(self):
+        self.deliver()
+        self.assertEqual(self.world.cars[0]["state"], "requesting")
+        self.assertEqual(self.world.cars[1]["state"], "waiting")
+        self.tick(1300)
+        self.assertEqual(self.world.snapshot()["metrics"]["completed"], 3)
+        self.tick(10, connected=False)
+        self.assertTrue(all(sum(c["stop_time_s"].values()) == 0 for c in self.world.cars))
+
+    def test_stop_time_telemetry_is_detached_and_a_new_run_starts_at_zero(self):
+        self.tick(2, connected=False)
+        messages = self.deliver(connected=False)
+        telemetry = next(p for t, p in messages if t == "telemetry/CAR01")
+        snapshot = self.world.snapshot()
+        self.assertEqual(telemetry["stop_time_s"], snapshot["cars"][0]["stop_time_s"])
+        self.assertEqual(telemetry["stop_time_s"]["communication"], 0.3)
+        telemetry["stop_time_s"]["communication"] = 999
+        snapshot["cars"][0]["stop_time_s"]["communication"] = 888
+        self.assertEqual(self.world.cars[0]["stop_time_s"]["communication"], 0.3)
+        self.assertEqual(self.world.cars[1]["stop_time_s"]["communication"], 0)
+        fresh = World(DEFAULT_CONFIG, "new-run")
+        self.assertTrue(all(sum(c["stop_time_s"].values()) == 0 for c in fresh.cars))
 
 
 if __name__ == "__main__":

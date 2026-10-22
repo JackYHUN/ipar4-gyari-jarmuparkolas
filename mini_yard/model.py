@@ -16,6 +16,9 @@ DEFAULT_CONFIG = {
     "sensor_range_m": 15.0, "heartbeat_timeout_s": 1.0,
 }
 
+_STOP_REASONS = {"pedestrian_stop": "pedestrian", "sensor_stop": "sensor_failure",
+                 "communication_stop": "communication"}
+
 
 def _number(value):
     try:
@@ -80,6 +83,7 @@ class World(_Producer):
                       "heading": 0.0, "speed": 0.0, "state": "waiting",
                       "slot_id": None, "reservation_id": None, "request_id": None,
                       "route": [], "distance_m": 0.0, "reason": "Indulásra vár.",
+                      "stop_time_s": dict.fromkeys(_STOP_REASONS.values(), 0.0),
                       "_segment": 1, "_command_seq": 0, "_next_request": 0.0}
                      for i in range(self.config["car_count"])]
         self.pedestrian = self.sensor_failure = False
@@ -220,6 +224,7 @@ class World(_Producer):
         messages = []
         if self.active is not None:
             car = self.cars[self.active]
+            position_before = car["x"], car["y"]
             if not connected or self.sensor_failure:
                 car["speed"] = 0.0
                 self._state(car, "communication_stop" if not connected else "sensor_stop",
@@ -232,6 +237,12 @@ class World(_Producer):
                     car["_next_request"] = self.sim_time + 1.0
             else:
                 self._move(car, dt)
+            # Csak a teljesen álló modelllépések számítanak; a fékezés és
+            # a stopvonalhoz még elmozduló utolsó lépés nem. Egy lépés egy ok.
+            if (car["state"] in _STOP_REASONS and car["speed"] == 0
+                    and (car["x"], car["y"]) == position_before):
+                reason = _STOP_REASONS[car["state"]]
+                car["stop_time_s"][reason] = round(car["stop_time_s"][reason] + dt, 9)
         messages.extend(self._emit("events", event) for event in self._events)
         self._events.clear()
         messages.extend(self._emit("telemetry/" + car["id"], self._car_view(car)) for car in self.cars)
