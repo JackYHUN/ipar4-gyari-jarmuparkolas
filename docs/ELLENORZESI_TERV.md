@@ -18,6 +18,9 @@ A terv az elvárt viselkedést rögzíti. A végrehajtás és az eredmény a tes
 | K10 | Az álló modellidő okonként visszakereshető legyen, kettős elszámolás nélkül. | Autónként összegzett `stop_time_s`; csak teljesen álló, aktív megállási lépések. | Modellteszt eltérő lépésközzel és egyidejű hibákkal; MQTT-n fogadott számláló és CSV-export összevetése. |
 | K11 | Már parkoló autó csak szabad helyre kerülhessen, és a mozgó autó ne kaphassa meg ugyanezt a helyet. | Központi MQTT-elhelyezési kérés és visszaigazolás; külön `parked_cars` lista. | Szünetben történő elhelyezés, ismételt kérés, foglalt és lefoglalt hely elutasítása; utána induló autó másik helyre kerül. |
 | K12 | A háttérjármű ne növelje a feladatteljesítési mutatókat. | A `completed` és `total` csak a gyártósorról érkező `cars` listát méri. | Kézi elhelyezés után a foglaltság nő, a teljesítés nem; új futás nullázza a háttérjárműveket is. |
+| K13 | Kézi háttérjármű eltávolításával új futás nélkül lehessen kapacitást adni a várakozó autónak. | Eltávolítási kérés és válasz a meglévő MQTT-menedzsmentúton; a flotta újrakéri a helyet. | Teljes kézi foglaltság mellett CAR01 vár; P03 felszabadítása után változatlan futásazonosítóval P03-ra indul. |
+| K14 | Régi elhelyezési vagy eltávolítási üzenet ne módosíthasson egy új háttérjárművet. | Elhelyezésenként egyedi `placement_id`; végrehajtott kérések ismétlése mellékhatás nélkül. | Elhelyezés → eltávolítás → új elhelyezés után régi kérés és visszaigazolás ismétlése; az új autó változatlan marad. |
+| K15 | Előző futás kezelőparancsa ne változtathassa meg az új futást. | `run_id` ellenőrzése fogadáskor és a sorba tett parancs alkalmazásakor. | Régi futásazonosító minden műveletnél elutasítva; reset előtt várakozó parancs nem szivárog át az új futásba. |
 
 ## Ellenőrzési szintek
 
@@ -78,3 +81,9 @@ A mérés bevezetése utáni MQTT/HTTP-integráció megőrzött bizonylata a `re
 A kézi elhelyezés hét új modelltesztjével együtt 21 modellteszt sikeres. A valódi MQTT/HTTP-integráció hét tesztesete 20 megfigyelt feltételt rögzített; a végrehajtott források lenyomatai változatlanok maradtak. A bizonylat a `results/integration/20261022T154401511804Z/verification.json`, az aktuális másolat a `results/verification.json`.
 
 A felület 24 automatizált szerződésellenőrzése sikeres (`results/ui/design-v2/frontend-check.json`). A külön böngészős próba a két elhelyezett autót, a változatlan 0/3 teljesítést, a P02 helyet kapó mozgó autót, a nullázást és a 390 képpont széles mobil elrendezést ellenőrizte. Bizonyítékai a `results/ui/manual-parking` mappában találhatók. Ezek funkcionális ellenőrzések; statisztikai következtetést nem alapoznak meg.
+
+## Kapacitásfelszabadítás és hibajavítások: 2026. október 28.
+
+A kézi eltávolítással, az elhelyezési példányok azonosításával és az előző futás kezelőparancsainak kizárásával bővült a program. Az aktuális ellenőrzésben 33 egységteszt (29 modell és 4 broker), 11 valódi MQTT/HTTP-integrációs eset 27 mért feltétellel, valamint 31 felületi szerződésellenőrzés sikeres. A forráslenyomatokat és a nyers futások elérési útját az aktuális `results/verification.json` rögzíti. A közvetítő lezárása után a háttérszál megszűnését és a listener elérhetetlenségét is ellenőrzi az integráció.
+
+A böngészős próba teljes kézi foglaltság után a felszabadított P03 helyre induló CAR01-et és a kis kijelzőn is teljes szélességben elérhető kezelőgombokat vizsgálta. A részleteket a [kapacitásfelszabadítás leírása](KAPACITAS_FELSZABADITAS.md), a helyi bizonyítékokat a `results/ui/capacity-release` mappa tartalmazza. A korábbi dátumú eredmények történeti állapotokat írnak le.

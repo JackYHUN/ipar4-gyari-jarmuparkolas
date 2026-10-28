@@ -32,11 +32,15 @@ A térkép mellett található kezelővel egy szabad parkolóhelyre már leparko
 
 A parkolókoordinátor az MQTT-n érkező elhelyezési kérésről a hely aktuális állapota alapján dönt. Foglalt vagy lefoglalt helyet nem ír felül. Az elfogadott autó a fogadott világállapotban és a térképen is megjelenik; a kezelő megvárja a visszaigazolást. Az elhelyezések az MQTT-naplóban visszakereshetők.
 
-Ezek a helyben álló autók a `world.parked_cars` listában találhatók. A gyártósorról érkező autók továbbra is a `world.cars` listát alkotják: a teljesítési számláló a három érkező autót méri, a szabad helyek száma viszont mindkét csoport foglalását figyelembe veszi. Új futásban a kézzel elhelyezett autók is törlődnek. Ha minden hely elfogy, az érkező autó kiosztásra vár; az alapmodell nem szabadít fel helyeket automatikusan.
+Ezek a helyben álló autók a `world.parked_cars` listában találhatók. A gyártósorról érkező autók továbbra is a `world.cars` listát alkotják: a teljesítési számláló a három érkező autót méri, a szabad helyek száma viszont mindkét csoport foglalását figyelembe veszi. Új futásban a kézzel elhelyezett autók is törlődnek. Ha minden hely elfogy, az érkező autó kiosztásra vár.
+
+A **„Kézzel elhelyezett autó”** választóból egy ilyen háttérjármű külön is eltávolítható az **„Autó eltávolítása”** gombbal. A hely felszabadításáról is az MQTT-koordinátor dönt; a rajz csak visszaigazolt változás után módosul. Futó modellben a kapacitásra váró autó a következő helyigénylésével megkaphatja a felszabadult helyet, új futás nélkül. A gyártósorról érkező flotta lefoglalt helye és már leparkolt autója ezzel nem távolítható el.
+
+Minden kézi elhelyezés saját `placement_id` azonosítót kap. Ez megkülönbözteti az ugyanarra a helyre később betett autót a korábbitól: régi eltávolítási kérés vagy megismételt korábbi visszaigazolás nem változtathatja meg az új foglaltságot. A működés és az ellenőrzési esetek a [kapacitásfelszabadítás leírásában](docs/KAPACITAS_FELSZABADITAS.md) szerepelnek.
 
 ## A feladat határa
 
-Az alapbeállítás három autó, nyolc parkolóhely, egy zebra és egy rögzített úthálózat. Egyszerre legfeljebb egy autó mozog; a többjárműves kereszteződési konfliktusok kezelése nem része ennek a változatnak. A várakozási területről a kijárathoz kerülés diszkrét átadás, nem modellezett sorban haladás; a megtett utat a kijárattól számolja a program. A leparkolt autó nem távozik, a parkolóhely foglalt marad. Kevés parkolóhelynél ezért maradhat várakozó autó.
+Az alapbeállítás három autó, nyolc parkolóhely, egy zebra és egy rögzített úthálózat. Egyszerre legfeljebb egy autó mozog; a többjárműves kereszteződési konfliktusok kezelése nem része ennek a változatnak. A várakozási területről a kijárathoz kerülés diszkrét átadás, nem modellezett sorban haladás; a megtett utat a kijárattól számolja a program. A gyártósori flotta leparkolt autója nem távozik, a parkolóhelye foglalt marad. A kézi háttérjármű eltávolítása pillanatszerű foglaltságmódosítás, nem modellezett kihajtás. Kevés parkolóhelynél továbbra is maradhat várakozó autó.
 
 A térkép helyi, 64 × 38 méteres koordinátarendszert használ. Nem egy tényleges Audi-telephely másolata. A szenzorjelek és a járműmozgás szimuláltak; nincs képfeldolgozás, valós kamera vagy valós önvezető jármű. A mozgás ideális útvonalkövetés egyszerű gyorsulással és fékezéssel. Kommunikációs és érzékelőhiba esetén a modell azonnal nullázza a sebességet; ez tudatos egyszerűsítés, nem valós fékezési modell.
 
@@ -73,6 +77,8 @@ A teljes fogadott MQTT-forgalom JSONL-fájlba kerül; a felületen csak a legut�
 - `/api/export?kind=messages`: fogadott MQTT-üzenetek;
 - `/api/export?kind=telemetry`: járműminták CSV-ben;
 - `/api/export?kind=events`: események.
+
+A kézi eltávolítás `parked_removed` eseményt ad a hely, a kérés és az elhelyezés azonosítójával. A kezelőparancsok az aktuális futáshoz kötöttek; egy régi böngészőlap vagy a nullázás előtt sorba állított művelet nem módosíthatja az új futást.
 
 A járművek `stop_time_s` mezője külön gyűjti a gyalogos (`pedestrian`), az érzékelőhiba (`sensor_failure`) és a felügyelt szívverés hiánya (`communication`) miatti álló modellidőt. A CSV-ben ezek a `stop_pedestrian_s`, `stop_sensor_failure_s` és `stop_communication_s` oszlopok. A számlálók az adott autó adott futásában összegzettek, ezért a CSV soraiban szereplő értékeket nem szabad összeadni: autó és futás szerint az utolsó mintát vagy két minta különbségét kell használni. Régi, mező nélküli napló exportálásakor az új oszlopok üresek.
 

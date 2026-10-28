@@ -218,7 +218,8 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(snap["metrics"]["preparked"], 1)
         self.assertEqual(snap["sim_time"], 0)
         self.assertEqual(snap["parked_cars"], [{"id": "PARK-P01", "car_id": "PARK-P01",
-            "slot_id": "P01", "x": 14, "y": 7, "heading": -90, "state": "parked", "origin": "preparked"}])
+            "slot_id": "P01", "x": 14, "y": 7, "heading": -90, "state": "parked", "origin": "preparked",
+            "placement_id": "setup-one"}])
         self.assertEqual(self.coordinator.slots[0]["state"], "occupied")
         self.assertEqual(self.coordinator.reservations, {})
         snap["parked_cars"][0]["x"] = 999
@@ -280,7 +281,8 @@ class ModelTests(unittest.TestCase):
                    request | {"car_id": "CAR01"}, request | {"slot_id": "P-1"}]
         for payload in invalid:
             self.assertEqual(self.coordinator.handle("requests/parking_setup", payload), [])
-        stale = request | {"request_id": "older", "slot_id": "P02", "car_id": "PARK-P02"}
+        stale = request | {"request_id": "older", "slot_id": "P02", "car_id": "PARK-P02",
+                           "placement_id": "older"}
         reply = self.coordinator.handle("requests/parking_setup", stale)[0][1]
         self.assertEqual(reply["kind"], "parking_setup_rejected")
         self.assertEqual(self.coordinator.slots[1]["state"], "free")
@@ -297,6 +299,143 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(fresh.snapshot()["parked_cars"], [])
         self.assertEqual(fresh.slots[0]["state"], "free")
         self.assertEqual(Coordinator({"slot_count": 1}, "next-run").reservations, {})
+
+    def remove_parked(self, slot_id="P01", request_id="remove-one", placement_id="setup-one"):
+        topic, request = self.world.request_parked_removal(slot_id, request_id, placement_id)
+        replies = self.coordinator.handle(topic, request)
+        for command_topic, payload in replies:
+            self.world.handle_command(command_topic, payload)
+        return request, replies[0][1]
+
+    def test_manual_removal_frees_both_views_without_advancing_model_or_completion(self):
+        self.place_parked()
+        self.world.flush_events()
+        _, ack = self.remove_parked()
+        self.assertEqual((ack["kind"], ack["operation"], ack["placement_id"]),
+                         ("parked_removed", "remove", "setup-one"))
+        snap = self.world.snapshot()
+        self.assertEqual(snap["parked_cars"], [])
+        self.assertEqual((snap["sim_time"], snap["metrics"]["completed"],
+                          snap["metrics"]["total"], snap["metrics"]["preparked"]), (0, 0, 3, 0))
+        for slot in (snap["slots"][0], self.coordinator.snapshot()["slots"][0]):
+            self.assertEqual(slot["state"], "free")
+            self.assertIsNone(slot["car_id"])
+            self.assertIsNone(slot["placement_id"])
+        event = self.world.flush_events()[0][1]
+        self.assertEqual((event["type"], event["placement_id"]), ("parked_removed", "setup-one"))
+
+    def test_removing_a_preparked_car_unblocks_capacity_wait_in_the_same_run(self):
+        self.world = World({"slot_count": 1}, "test-run")
+        self.coordinator = Coordinator({"slot_count": 1}, "test-run")
+        self.place_parked()
+        self.tick(30)
+        self.assertEqual(self.world.cars[0]["state"], "requesting")
+        request_id = self.world.cars[0]["request_id"]
+        self.remove_parked()
+        self.tick(500)
+        self.assertEqual(self.world.run_id, "test-run")
+        self.assertEqual((self.world.cars[0]["state"], self.world.cars[0]["slot_id"]),
+                         ("parked", "P01"))
+        self.assertEqual(self.world.cars[0]["request_id"], request_id)
+        self.assertEqual(self.world.snapshot()["metrics"]["completed"], 1)
+        self.assertEqual(self.world.cars[1]["state"], "requesting")
+        self.assertIsNone(self.world.slots[0]["placement_id"])
+        self.assertIsNone(self.coordinator.slots[0]["placement_id"])
+
+    def test_removal_of_free_unknown_reserved_or_fleet_occupied_slots_is_rejected(self):
+        self.place_parked()
+        self.deliver()
+        self.assertEqual(self.coordinator.slots[1]["state"], "reserved")
+        for slot in ("P99", "P08", "P02"):
+            _, ack = self.remove_parked(slot, "reject-remove-" + slot)
+            self.assertEqual(ack["kind"], "parking_setup_rejected")
+        self.tick(1300)
+        self.assertEqual(self.coordinator.slots[1]["state"], "occupied")
+        _, ack = self.remove_parked("P02", "reject-fleet-occupied")
+        self.assertEqual(ack["kind"], "parking_setup_rejected")
+        self.assertEqual(self.coordinator.slots[1]["car_id"], "CAR01")
+        self.assertEqual(len(self.coordinator.reservations), 3)
+        self.assertEqual(self.world.snapshot()["metrics"]["completed"], 3)
+        self.assertEqual(len(self.world.parked_cars), 1)
+
+    def test_old_spawn_and_removal_replays_cannot_resurrect_or_delete_replacement(self):
+        spawn_request, _ = self.place_parked()
+        remove_request, remove_ack = self.remove_parked()
+        # A fresh coordinator seq is still the same settled spawn operation.
+        old_spawn_ack = self.coordinator.handle("requests/parking_setup", spawn_request)[0][1]
+        self.assertTrue(self.world.handle_command("commands/parking_setup", old_spawn_ack))
+        self.assertEqual(self.world.parked_cars, [])
+        self.assertEqual(self.coordinator.slots[0]["state"], "free")
+        self.place_parked(request_id="replacement")
+        for old_request in (spawn_request, remove_request, remove_request):
+            ack = self.coordinator.handle("requests/parking_setup", old_request)[0][1]
+            self.assertTrue(self.world.handle_command("commands/parking_setup", ack))
+            self.assertEqual(len(self.world.parked_cars), 1)
+            self.assertEqual(self.world.parked_cars[0]["placement_id"], "replacement")
+            self.assertEqual(self.coordinator.slots[0]["placement_id"], "replacement")
+        self.assertFalse(self.world.handle_command("commands/parking_setup", remove_ack))
+        self.assertEqual([payload["type"] for _, payload in self.world.flush_events()],
+                         ["parked_spawned", "parked_removed", "parked_spawned"])
+
+    def test_stale_placement_and_conflicting_operation_or_token_reuse_are_rejected(self):
+        spawn_request, _ = self.place_parked()
+        self.remove_parked()
+        self.place_parked(request_id="replacement")
+        _, stale_ack = self.remove_parked(request_id="stale-token")
+        self.assertEqual(stale_ack["kind"], "parking_setup_rejected")
+        self.assertEqual(self.world.parked_cars[0]["placement_id"], "replacement")
+        self.assertEqual(self.coordinator.slots[0]["placement_id"], "replacement")
+        for request_id, placement_id in (("setup-one", "setup-one"),
+                                         ("remove-one", "replacement")):
+            with self.assertRaises(ValueError):
+                self.world.request_parked_removal("P01", request_id, placement_id)
+        conflict = spawn_request | {"operation": "remove", "seq": self.world.seq + 1}
+        ack = self.coordinator.handle("requests/parking_setup", conflict)[0][1]
+        self.assertEqual(ack["kind"], "parking_setup_rejected")
+        self.assertEqual(ack["operation"], "remove")
+        self.assertEqual(self.coordinator.slots[0]["placement_id"], "replacement")
+
+    def test_removal_ack_requires_current_run_request_operation_and_placement(self):
+        self.place_parked()
+        request = self.world.request_parked_removal("P01", "remove-valid", "setup-one")[1]
+        ack = self.coordinator.handle("requests/parking_setup", request)[0][1]
+        for key, value in (("run_id", "old-run"), ("request_id", "unknown"),
+                           ("operation", "spawn"), ("placement_id", "replacement"),
+                           ("kind", "parked_spawned"), ("slot_id", "P02"), ("seq", 0)):
+            with self.subTest(key=key):
+                self.assertFalse(self.world.handle_command("commands/parking_setup", ack | {key: value}))
+        self.assertEqual(len(self.world.parked_cars), 1)
+        self.assertTrue(self.world.handle_command("commands/parking_setup", ack))
+        self.assertEqual(self.world.parked_cars, [])
+        self.assertFalse(self.world.handle_command("commands/parking_setup", ack))
+
+    def test_legacy_spawn_request_defaults_to_spawn_and_request_placement(self):
+        request = self.world.request_parked_car("P01", "legacy")[1]
+        del request["operation"]
+        del request["placement_id"]
+        ack = self.coordinator.handle("requests/parking_setup", request)[0][1]
+        self.assertEqual((ack["operation"], ack["placement_id"]), ("spawn", "legacy"))
+        self.assertTrue(self.world.handle_command("commands/parking_setup", ack))
+        self.assertEqual(self.world.parked_cars[0]["placement_id"], "legacy")
+        self.assertEqual(self.coordinator.slots[0]["placement_id"], "legacy")
+
+    def test_spawn_and_remove_share_the_bounded_management_request_budget(self):
+        for index in range(256):
+            if index % 2:
+                topic, request = self.world.request_parked_removal("P99", f"request-{index}", "missing")
+            else:
+                topic, request = self.world.request_parked_car("P99", f"request-{index}")
+            ack = self.coordinator.handle(topic, request)[0][1]
+            self.assertTrue(self.world.handle_command("commands/parking_setup", ack))
+        self.assertEqual(len(self.world._parking_setup), 256)
+        self.assertEqual(len(self.coordinator._parking_setup), 256)
+        with self.assertRaises(ValueError):
+            self.world.request_parked_removal("P01", "too-many", "missing")
+        overflow = request | {"slot_id": "P01", "car_id": "PARK-P01", "seq": request["seq"] + 1,
+                              "operation": "spawn", "request_id": "too-many", "placement_id": "too-many"}
+        ack = self.coordinator.handle("requests/parking_setup", overflow)[0][1]
+        self.assertEqual(ack["kind"], "parking_setup_rejected")
+        self.assertEqual(self.coordinator.slots[0]["state"], "free")
 
 
 if __name__ == "__main__":

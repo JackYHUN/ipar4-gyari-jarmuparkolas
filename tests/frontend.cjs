@@ -85,7 +85,7 @@ vm.runInContext(source.replace(/\bpoll\(\);\s*$/, "") + `
 globalThis.production = {
   esc,num,fmt,stateClass,updateMarkup,renderMap,renderInspector,render,renderMessages,poll,control,
   lifecycleStep,renderProgress,settleControls,selectCar,updateNavigation,
-  freeParkingSlots,renderParkingSetup,settleParkingSetup,spawnParked,
+  freeParkingSlots,removableParkedCars,renderParkingSetup,settleParkingSetup,spawnParked,removeParked,
   setState(value) { state = value; transportError = ""; settleParkingSetup(value); },
   select(value) { selectedCar = value; },
 };`, sandbox, {filename: "web/app.js"});
@@ -109,6 +109,15 @@ function stateFixture() {
       {id: "CAR02", x: 14, y: 35, heading: 0, speed: 0, state: "waiting", route: [], sensor: {valid: true, pedestrian: false, range_m: 15}},
     ]}
   };
+}
+function preparkedFixture(runId = "removal-fixture", placementId = "placement-one") {
+  const s = stateFixture(); s.run_id = runId;
+  const car = {id:"PARK-P01",car_id:"PARK-P01",slot_id:"P01",x:14,y:7,heading:-90,
+    state:"parked",origin:"preparked",placement_id:placementId};
+  s.world.parked_cars = [car];
+  Object.assign(s.world.map.slots[0],{state:"occupied",car_id:car.id,placement_id:placementId});
+  Object.assign(s.coordinator.slots[0],{state:"occupied",car_id:car.id,placement_id:placementId});
+  return s;
 }
 async function main() {
   await check("last navigation section remains current at the document scroll limit", () => {
@@ -263,7 +272,7 @@ async function main() {
     await Promise.resolve(); await Promise.resolve();
     assert.equal(requests.length, 1, "Second command bypassed pending first command");
     release(); await Promise.all([first, second]);
-    assert.deepEqual(requests, [{action: "speed", value: 4}, {action: "sensor_failure", active: true}]);
+    assert.deepEqual(requests, [{action: "speed", value: 4,run_id:s.run_id}, {action: "sensor_failure", active: true,run_id:s.run_id}]);
   });
   await check("main UI contains neither the defense section, footer nor comparison links", () => {
     assert(!/<footer\b|id="learn"|href="#learn"|FELKÉSZÜLÉS A VÉDÉSRE/.test(html));
@@ -307,14 +316,14 @@ async function main() {
     assert.equal(elements.get("spawn-parked").disabled, true);
     assert.equal(elements.get("parked-count").textContent, "0 helyben álló");
     assert(!elements.get("yard").innerHTML.includes('data-preparked='));
-    s.parking_setup = {kind:"parked_spawned",request_id:requests[0].request_id,run_id:s.run_id,slot_id:"P01",car_id:"PARK-P01"};
+    s.parking_setup = {kind:"parked_spawned",operation:"spawn",placement_id:requests[0].request_id,request_id:requests[0].request_id,run_id:s.run_id,slot_id:"P01",car_id:"PARK-P01"};
     ui.settleParkingSetup(s); ui.render();
     assert.equal(elements.get("spawn-parked").getAttribute("aria-busy"), "true", "Ack alone must not settle");
-    s.world.parked_cars = [{id:"PARK-P01",car_id:"PARK-P01",slot_id:"P01",x:14,y:7,heading:-90,state:"parked",origin:"preparked"}];
+    s.world.parked_cars = [{id:"PARK-P01",car_id:"PARK-P01",slot_id:"P01",x:14,y:7,heading:-90,state:"parked",origin:"preparked",placement_id:requests[0].request_id}];
     s.world.map.slots[0].state = "occupied";
     ui.settleParkingSetup(s); ui.render();
     assert.equal(elements.get("spawn-parked").getAttribute("aria-busy"), "true", "World sample alone must not settle");
-    s.coordinator.slots[0] = {...s.coordinator.slots[0],state:"occupied",car_id:"PARK-P01"};
+    s.coordinator.slots[0] = {...s.coordinator.slots[0],state:"occupied",car_id:"PARK-P01",placement_id:requests[0].request_id};
     ui.settleParkingSetup(s); ui.render();
     assert.equal(elements.get("spawn-parked").getAttribute("aria-busy"), "false");
     assert.equal(elements.get("parked-status").dataset.tone, "success");
@@ -325,6 +334,8 @@ async function main() {
     assert(!elements.get("car-select").innerHTML.includes("PARK-P01"));
     assert(!elements.get("fleet").innerHTML.includes("PARK-P01"));
     assert(elements.get("kpi-completed").innerHTML.startsWith("0 "));
+    s.world.map.slots[1].state = "occupied"; s.coordinator.slots[1].state = "occupied"; ui.render();
+    assert.match(elements.get("parked-status").textContent, /eltávolításával helyet szabadíthatsz/);
   });
   await check("unrelated or wrong-run acknowledgements cannot settle a parked placement", async () => {
     const s = stateFixture(); s.run_id = "setup-mismatch"; ui.setState(s); ui.render(); let request;
@@ -332,7 +343,7 @@ async function main() {
       request = JSON.parse(options.body); return {ok:true,json:async () => ({request_id:request.request_id})};
     };
     await ui.spawnParked();
-    s.parking_setup = {kind:"parking_setup_rejected",request_id:"other-request",run_id:s.run_id,message:"Unrelated"};
+    s.parking_setup = {kind:"parking_setup_rejected",operation:"spawn",slot_id:request.slot_id,car_id:`PARK-${request.slot_id}`,placement_id:request.request_id,request_id:"other-request",run_id:s.run_id,message:"Unrelated"};
     ui.settleParkingSetup(s); ui.render();
     assert.equal(elements.get("spawn-parked").getAttribute("aria-busy"), "true");
     s.parking_setup = {...s.parking_setup,request_id:request.request_id,run_id:"old-run"};
@@ -385,8 +396,132 @@ async function main() {
     assert(markup.includes("&quot; onload=&quot;x"));
     assert(!markup.includes("MISSING-POSITION")); assert(!/NaN|undefined/.test(markup));
   });
+  await check("removal lists only centrally confirmed manual placements and preserves selection", () => {
+    const s = preparkedFixture("remove-choices");
+    s.world.parked_cars.push({id:"PARK-P02",car_id:"PARK-P02",slot_id:"P02",state:"parked",origin:"preparked"});
+    s.coordinator.slots[1] = {...s.coordinator.slots[1],state:"occupied",car_id:"CAR02"};
+    ui.setState(s); ui.render();
+    assert.equal(ui.removableParkedCars().length, 1);
+    assert.equal(elements.get("remove-parked-slot").value, "P01");
+    assert(!elements.get("remove-parked-slot").innerHTML.includes('value="P02"'));
+    document.activeElement = elements.get("remove-parked-slot");
+    const writes = elements.get("remove-parked-slot").writes; ui.render();
+    assert.equal(elements.get("remove-parked-slot").writes, writes);
+    assert.equal(document.activeElement, elements.get("remove-parked-slot"));
+    s.coordinator.slots[0].placement_id = "newer-placement"; ui.render();
+    assert.equal(ui.removableParkedCars().length, 0);
+    assert.equal(elements.get("remove-parked").disabled, true);
+    assert.equal(elements.get("remove-parked-slot").value, "");
+    document.activeElement = null;
+  });
+  await check("removal waits for matching acknowledgement and both received states without deleting optimistically", async () => {
+    const s = preparkedFixture("remove-success"); ui.setState(s); ui.render();
+    const requests = [];
+    sandbox.fetch = async (_url, options) => {
+      const request = JSON.parse(options.body); requests.push(request);
+      return {ok:true,json:async () => ({request_id:request.request_id})};
+    };
+    await Promise.all([ui.removeParked(),ui.removeParked(),ui.spawnParked()]);
+    assert.equal(requests.length, 1);
+    const request = requests[0];
+    assert.equal(request.action, "remove_parked"); assert.equal(request.slot_id, "P01");
+    assert.equal(request.placement_id, "placement-one"); assert.equal(request.run_id, s.run_id);
+    assert.equal(elements.get("remove-parked").getAttribute("aria-busy"), "true");
+    assert.equal(elements.get("spawn-parked").disabled, true);
+    assert.equal(elements.get("parked-slot").disabled, true);
+    assert.equal(elements.get("remove-parked-slot").disabled, true);
+    assert(elements.get("yard").innerHTML.includes('data-preparked="PARK-P01"'));
+    assert.equal(elements.get("parked-count").textContent, "1 helyben álló");
+    s.parking_setup = {...request,operation:"remove",car_id:"PARK-P01",kind:"parked_removed"};
+    ui.settleParkingSetup(s); ui.render();
+    assert.equal(elements.get("remove-parked").getAttribute("aria-busy"), "true", "Ack alone cannot delete the car");
+    s.world.parked_cars = []; ui.settleParkingSetup(s); ui.render();
+    assert.equal(elements.get("remove-parked").getAttribute("aria-busy"), "true", "World absence alone cannot settle removal");
+    s.coordinator.slots[0] = {...s.coordinator.slots[0],state:"reserved",car_id:"CAR01",placement_id:null};
+    s.world.map.slots[0] = {...s.world.map.slots[0],state:"reserved",car_id:"CAR01",placement_id:null};
+    ui.settleParkingSetup(s); ui.render();
+    assert.equal(elements.get("remove-parked").getAttribute("aria-busy"), "false");
+    assert.equal(elements.get("parked-status").dataset.tone, "success");
+    assert.match(elements.get("parked-status").textContent, /eltávolítva/);
+    assert(!elements.get("yard").innerHTML.includes('data-preparked="PARK-P01"'));
+    assert.equal(elements.get("parked-count").textContent, "0 helyben álló");
+    assert(elements.get("kpi-completed").innerHTML.startsWith("0 "));
+    assert.equal(elements.get("remove-parked").disabled, true);
+  });
+  await check("removal ignores a wrong placement token and handles matching rejection as text", async () => {
+    const s = preparkedFixture("remove-mismatch"); ui.setState(s); ui.render(); let request;
+    sandbox.fetch = async (_url, options) => {
+      request = JSON.parse(options.body); return {ok:true,json:async () => ({request_id:request.request_id})};
+    };
+    await ui.removeParked();
+    s.parking_setup = {...request,operation:"remove",car_id:"PARK-P01",kind:"parking_setup_rejected",placement_id:"different-placement",message:"Unrelated"};
+    ui.settleParkingSetup(s); ui.render();
+    assert.equal(elements.get("remove-parked").getAttribute("aria-busy"), "true");
+    s.parking_setup.placement_id = request.placement_id;
+    s.parking_setup.message = '<img src=x onerror="alert(1)">A foglaltság megváltozott.';
+    ui.settleParkingSetup(s); ui.render();
+    assert.equal(elements.get("remove-parked").getAttribute("aria-busy"), "false");
+    assert.equal(elements.get("parked-status").dataset.tone, "error");
+    assert.equal(elements.get("parked-status").textContent, s.parking_setup.message);
+    assert(elements.get("yard").innerHTML.includes('data-preparked="PARK-P01"'));
+  });
+  await check("HTTP removal rejection preserves the observed parked car and releases shared controls", async () => {
+    const s = preparkedFixture("remove-http-error"); ui.setState(s); ui.render();
+    sandbox.fetch = async () => ({ok:false,json:async () => ({error:"A kézi autó példánya már megváltozott."})});
+    await ui.removeParked();
+    assert.equal(elements.get("remove-parked").disabled, false);
+    assert.equal(elements.get("spawn-parked").disabled, false);
+    assert.equal(elements.get("parked-status").dataset.tone, "error");
+    assert.equal(s.world.parked_cars.length, 1);
+    assert(elements.get("yard").innerHTML.includes('data-preparked="PARK-P01"'));
+  });
+  await check("new run cancels pending removal and ignores the delayed old HTTP failure", async () => {
+    const s = preparkedFixture("remove-reset-before"); ui.setState(s); ui.render(); let release;
+    sandbox.fetch = async () => {
+      await new Promise(resolve => {release = resolve;});
+      return {ok:false,json:async () => ({error:"Old run rejection"})};
+    };
+    const old = ui.removeParked(); await Promise.resolve(); await Promise.resolve();
+    const next = stateFixture(); next.run_id = "remove-reset-after"; ui.setState(next); ui.render();
+    assert.equal(elements.get("remove-parked").getAttribute("aria-busy"), "false");
+    release(); await old;
+    assert.equal(elements.get("parked-status").dataset.tone, "");
+    assert.equal(elements.get("parked-count").textContent, "0 helyben álló");
+  });
+  await check("full capacity explains individual removal and missing acknowledgement does not freeze management", async () => {
+    const s = preparkedFixture("remove-timeout");
+    s.world.map.slots[1].state = "occupied"; s.coordinator.slots[1].state = "occupied";
+    ui.setState(s); ui.render();
+    assert.match(elements.get("parked-status").textContent, /eltávolításával helyet szabadíthatsz/);
+    assert.equal(elements.get("spawn-parked").disabled, true);
+    assert.equal(elements.get("remove-parked").disabled, false);
+    sandbox.fetch = async (_url, options) => ({ok:true,json:async () => ({request_id:JSON.parse(options.body).request_id})});
+    await ui.removeParked(); fixtureNow += 8100; ui.settleParkingSetup(s); ui.render();
+    assert.equal(elements.get("remove-parked").getAttribute("aria-busy"), "false");
+    assert.equal(elements.get("remove-parked").disabled, false);
+    assert.equal(elements.get("parked-status").dataset.tone, "error");
+    assert.equal(s.world.parked_cars.length, 1);
+  });
+  await check("queued ordinary controls remain bound to their run and late replies cannot affect a new run", async () => {
+    const s = stateFixture(); s.run_id = "ordinary-old-run"; ui.setState(s); ui.settleControls(s); ui.render();
+    const requests = []; let release;
+    sandbox.fetch = async (_url, options) => {
+      requests.push(JSON.parse(options.body));
+      if (requests.length === 1) await new Promise(resolve => {release = resolve;});
+      return {ok:false,json:async () => ({error:"Old run rejection"})};
+    };
+    const first = ui.control("speed", {value:4}), queued = ui.control("sensor_failure", {active:true});
+    await Promise.resolve(); await Promise.resolve();
+    const next = stateFixture(); next.run_id = "ordinary-new-run"; ui.setState(next); ui.settleControls(next); ui.render();
+    release(); await Promise.all([first,queued]);
+    assert.equal(requests.length, 1, "Queued old-run command was sent into a new run");
+    assert.equal(requests[0].run_id, "ordinary-old-run");
+    assert.equal(speedButtons[0].disabled, false);
+    assert.equal(actionButtons.find(button => button.dataset.action === "sensor_failure").disabled, false);
+    assert.notEqual(elements.get("error").textContent, "Old run rejection");
+  });
   await check("transport failure visibly marks the last state as stale", async () => {
-    ui.setState(stateFixture()); ui.render();
+    ui.setState(preparkedFixture("stale-management")); ui.render();
     sandbox.fetch = async () => { throw Error("Fixture connection lost"); };
     await ui.poll();
     assert.equal(elements.get("error").hidden, false);
@@ -396,6 +531,7 @@ async function main() {
     assert.match(elements.get("map-status").textContent, /utolsó|nincs friss|elavult|szünet/i);
     assert.equal(elements.get("play").disabled, true);
     assert.equal(elements.get("spawn-parked").disabled, true);
+    assert.equal(elements.get("remove-parked").disabled, true);
     assert.match(elements.get("parked-status").textContent, /Nincs friss kapcsolat/);
   });
   const failed = checks.filter(check => !check.passed);

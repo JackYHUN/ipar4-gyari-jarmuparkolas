@@ -44,7 +44,11 @@ class Application:
         if getattr(self, "log", None):
             self.log.close()
         self.buses = []
-        self.run_id = uuid.uuid4().hex[:10]
+        # A futás és a hozzá tartozó kéréskeret együtt váltson. A HTTP-szál
+        # az MQTT-kliensek újraindulása közben is fogadhat kezelői kérést.
+        with self.lock:
+            self.run_id = uuid.uuid4().hex[:10]
+            self._setup_controls = {}
         self.world = World(self.config, self.run_id)
         self.coordinator = Coordinator(self.config, self.run_id)
         self.vehicle_bus = Bus(self.mqtt_port, self.run_id, "vehicle", ["commands/+", "service/heartbeat"])
@@ -68,8 +72,6 @@ class Application:
         self.events, self.messages = deque(maxlen=80), deque(maxlen=120)
         self.observed_world, self.observed_coordinator = {}, {}
         self.parking_setup = None
-        with self.lock:
-            self._setup_controls = {}
         self.last_heartbeat = None
         self.last_message = None
         self.heartbeat_sent = self.coordinator_sent = 0
@@ -80,31 +82,45 @@ class Application:
 
     def command(self, data):
         action = data.get("action")
-        if action not in {"pause", "resume", "reset", "speed", "pedestrian", "sensor_failure", "link_failure", "spawn_parked"}:
+        if not isinstance(action, str) or action not in {
+                "pause", "resume", "reset", "speed", "pedestrian", "sensor_failure",
+                "link_failure", "spawn_parked", "remove_parked"}:
             raise ValueError("Ismeretlen művelet")
         if action == "speed" and (type(data.get("value")) is not int or data["value"] not in (1, 2, 4)):
             raise ValueError("A sebesség 1, 2 vagy 4 lehet")
         if action in self.flags and type(data.get("active")) is not bool:
             raise ValueError("Az active mezőnek logikai értéknek kell lennie")
-        if action == "spawn_parked":
+        setup = action in ("spawn_parked", "remove_parked")
+        if setup:
             slot_id, request_id = data.get("slot_id"), data.get("request_id", uuid.uuid4().hex)
             if not isinstance(slot_id, str) or re.fullmatch(r"P[0-9]{2}", slot_id) is None:
                 raise ValueError("A slot_id például P01 alakú parkolóhely-azonosító legyen")
             if (not isinstance(request_id, str) or not 1 <= len(request_id) <= 160
                     or re.fullmatch(r"[A-Za-z0-9_.:-]+", request_id) is None):
                 raise ValueError("A request_id legfeljebb 160 betűt, számot vagy _ . : - jelet tartalmazhat")
-            with self.lock:
-                if data.get("run_id", self.run_id) != self.run_id:
-                    raise ValueError("A futásazonosító megváltozott; frissítsd a nézetet")
+            operation = "spawn" if action == "spawn_parked" else "remove"
+            placement_id = request_id if operation == "spawn" else data.get("placement_id")
+            if (not isinstance(placement_id, str) or not 1 <= len(placement_id) <= 160
+                    or re.fullmatch(r"[A-Za-z0-9_.:-]+", placement_id) is None):
+                raise ValueError("Az eltávolításhoz érvényes placement_id szükséges")
+        with self.lock:
+            if data.get("run_id", self.run_id) != self.run_id:
+                raise ValueError("A futásazonosító megváltozott; frissítsd a nézetet")
+            if setup:
+                identity = (slot_id, operation, placement_id)
                 existing = self._setup_controls.get(request_id)
-                if existing is not None and existing != slot_id:
-                    raise ValueError("A kérésazonosító már másik parkolóhelyhez tartozik")
+                if existing is not None and existing != identity:
+                    raise ValueError("A kérésazonosító már másik parkolóbeállításhoz tartozik")
                 if existing is None and len(self._setup_controls) >= 256:
                     raise ValueError("A futás parkolóbeállítási kéréskerete betelt; indíts új futást")
-                self._setup_controls[request_id] = slot_id
-                self.controls.put(dict(data, request_id=request_id, run_id=self.run_id))
+                self._setup_controls[request_id] = identity
+                queued = dict(data, request_id=request_id, placement_id=placement_id,
+                              run_id=self.run_id)
+            else:
+                queued = dict(data, run_id=self.run_id)
+            self.controls.put(queued)
+        if setup:
             return {"request_id": request_id}
-        self.controls.put(dict(data))
         return {}
 
     def _apply_controls(self):
@@ -113,6 +129,10 @@ class Application:
                 data = self.controls.get_nowait()
             except queue.Empty:
                 return
+            if data["run_id"] != self.run_id:
+                # A sorba állítás után végrehajtott reset sem engedheti a régi
+                # lap vagy korábbi kérés beavatkozását az új futásba.
+                continue
             action = data["action"]
             if action == "reset":
                 self._new_run()
@@ -121,11 +141,12 @@ class Application:
                 self.paused = action == "pause"
             elif action == "speed":
                 self.speed = data["value"]
-            elif action == "spawn_parked":
-                if data["run_id"] != self.run_id:
-                    # A reset előtti kezelői kérés nem változtathatja az új futást.
-                    continue
-                topic, payload = self.world.request_parked_car(data["slot_id"], data["request_id"])
+            elif action in ("spawn_parked", "remove_parked"):
+                if action == "spawn_parked":
+                    topic, payload = self.world.request_parked_car(data["slot_id"], data["request_id"])
+                else:
+                    topic, payload = self.world.request_parked_removal(
+                        data["slot_id"], data["request_id"], data["placement_id"])
                 self.vehicle_bus.publish(topic, payload)
             else:
                 self.flags[action] = data["active"]

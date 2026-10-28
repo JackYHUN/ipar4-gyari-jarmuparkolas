@@ -37,10 +37,11 @@ note bottom of communication_stop
   feloldáskor a többi feltétel is ellenőrzendő.
 end note
 note bottom of parked
-  Ebben a változatban nincs távozás.
-  A parkolóhely foglalt marad.
+  A gyártósori flotta parkolóhelye foglalt marad.
   A kézzel elhelyezett háttérjárművek külön
   parked_cars listában, eleve parkolva jelennek meg;
   nem járják be ezt a mozgási állapotgépet.
+  Kézzel eltávolíthatók; ez pillanatszerű
+  kapacitásváltozás, nem modellezett kihajtás.
 end note
 @enduml

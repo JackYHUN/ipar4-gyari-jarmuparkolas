@@ -111,11 +111,16 @@ h3 { margin: 0; font-size: 14px; font-weight: 680; }
 .parked-setup-heading > div { min-width: 0; }
 .parked-setup-heading .badge { flex: 0 0 auto; margin-left: auto; margin-top: 4px; background: #eaf4f1; color: #326d64; }
 .parked-explanation { max-width: 480px; margin: 7px 0 0; color: var(--muted); font-size: 12px; line-height: 1.65; }
-.parked-setup-controls > label { display: block; margin-bottom: 7px; font-size: 11px; font-weight: 600; color: #506b7a; }
-.parked-setup-actions { display: flex; gap: 10px; }
-.parked-setup-actions select { min-width: 90px; max-width: none; flex: 1; }
+.parked-setup-controls, .parked-setup-control { min-width: 0; }
+.parked-setup-control + .parked-setup-control { margin-top: 15px; padding-top: 15px; border-top: 1px solid #e4edeb; }
+.parked-setup-control > label { display: block; margin-bottom: 7px; font-size: 11px; font-weight: 600; color: #506b7a; }
+.parked-setup-actions { display: grid; grid-template-columns: minmax(0, 1fr) max-content; gap: 10px; min-width: 0; }
+.parked-setup-actions select { min-width: 0; max-width: 100%; width: 100%; }
 .parked-setup-actions .button { min-height: 42px; }
-.parked-status { min-height: 1.5em; margin: 9px 0 0; font-size: 11px; line-height: 1.6; color: #69818f; }
+.parked-setup-actions .secondary { color: #436773; border-color: #ccdce0; background: #f5f9fa; }
+.parked-setup-actions .secondary:hover:not(:disabled) { border-color: #8bb4bd; background: #ebf3f5; }
+.parked-help { margin: 7px 0 0; color: var(--muted); font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }
+.parked-status { min-height: 1.5em; margin: 9px 0 0; font-size: 11px; line-height: 1.6; color: #69818f; overflow-wrap: anywhere; }
 .parked-status[data-tone="success"] { color: #227265; }
 .parked-status[data-tone="error"] { color: #a44e47; }
 .parked-status[data-tone="pending"] { color: #486e91; }
@@ -283,7 +288,7 @@ body.embed main { padding: 20px 18px 0; }
   .topbar nav a { font-size: 12px; padding: 8px 12px; }
   #main, #evidence, .inspector { scroll-margin-top: 144px; }
   .workspace { grid-template-columns: minmax(0, 1fr); grid-template-areas: "map" "setup" "fleet" "inspector" "controls"; }
-  .parked-setup-card { grid-template-columns: 1fr; gap: 16px; padding: 20px; }
+  .parked-setup-card { grid-template-columns: minmax(0, 1fr); gap: 16px; padding: 20px; }
   .parked-setup-heading .kpi-icon { display: grid; }
   .kpi-icon { display: none; }
   .kpis article { min-height: 103px; padding: 16px 14px 30px; }
@@ -352,9 +357,9 @@ body.embed main { padding: 20px 18px 0; }
   .parked-setup-heading > div { flex: 1 1 180px; }
   .parked-setup-heading .badge { font-size: 9px; padding: 5px 7px; }
   .parked-explanation { font-size: 11px; }
-  .parked-setup-actions { gap: 8px; }
-  .parked-setup-actions select { min-width: 74px; }
-  .parked-setup-actions .button { font-size: 11px; padding: 9px 10px; }
+  .parked-setup-actions { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+  .parked-setup-actions select { min-width: 0; }
+  .parked-setup-actions .button { width: 100%; font-size: 11px; padding: 9px 10px; }
   .card-head { padding: 15px 14px; min-height: 69px; }
   .card-head .eyebrow { font-size: 9px; letter-spacing: .9px; }
   h2 { font-size: 15px; letter-spacing: -.3px; }

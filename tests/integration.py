@@ -87,6 +87,17 @@ class RealMqttHttpIntegration(unittest.TestCase):
             cls.server.server_close()
             cls.server_thread.join(timeout=3)
         cls.app.close()
+        if cls.app.broker.thread.is_alive() or cls.app.broker.error:
+            raise AssertionError("Az MQTT-közvetítő nem állt le hibamentesen")
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.settimeout(0.5)
+            if probe.connect_ex(("127.0.0.1", cls.app.mqtt_port)) == 0:
+                raise AssertionError("A lezárt MQTT-közvetítő portja még fogad kapcsolatot")
+        CHECKS.append({"name": "broker_shutdown_finishes_and_closes_listener",
+                       "test": "tearDownClass", "checked_utc": utc_now(), "passed": True,
+                       "observed": {"broker_thread_alive": False, "broker_error": None,
+                                    "mqtt_listener_accepts_connections": False},
+                       "expected": "közvetítőszál leállt; nincs hiba és nincs nyitva maradt MQTT-listener"})
         EVIDENCE.mkdir(parents=True, exist_ok=True)
         raw = cls.root / "results"
         if raw.exists():
@@ -160,6 +171,23 @@ class RealMqttHttpIntegration(unittest.TestCase):
         return self.wait_for(lambda s: (s.get("parking_setup") or {}).get("request_id") == returned["request_id"]
                              and s["parking_setup"]["seq"] > old_ack_seq,
                              "parkolóbeállítás MQTT-visszaigazolása")
+
+    def remove_parked(self, slot_id, placement_id, request_id):
+        before = self.state()
+        status, _, body = self.request("/api/control", {
+            "action": "remove_parked", "slot_id": slot_id, "placement_id": placement_id,
+            "request_id": request_id, "run_id": before["run_id"]})
+        self.assertEqual(status, 202)
+        self.assertEqual(json.loads(body)["request_id"], request_id)
+        old_seq = (before.get("parking_setup") or {}).get("seq", 0)
+        return self.wait_for(lambda s: (s.get("parking_setup") or {}).get("request_id") == request_id
+                             and s["parking_setup"]["seq"] > old_seq,
+                             "eltávolítás MQTT-visszaigazolása")
+
+    @staticmethod
+    def slot(state, slot_id):
+        return next((slot for slot in state.get("coordinator", {}).get("slots", [])
+                     if slot["id"] == slot_id), {})
 
     def test_01_nominal_three_cars_exports_and_external_repeat(self):
         started = time.monotonic()
@@ -449,6 +477,146 @@ class RealMqttHttpIntegration(unittest.TestCase):
             "invalid_controls": len(invalid) + 1, "status": 400,
             "new_preparked_count": len(fresh["world"]["parked_cars"]), "new_ack": fresh["parking_setup"]},
             "reset üríti a statikus autókat és a visszaigazolást; hibás vagy előző futáshoz tartozó kérés elutasítva")
+
+    def test_08_remove_paused_replay_and_placement_identity(self):
+        self.spawn("P01", "placement-first")
+        self.wait_for(lambda s: any(c.get("placement_id") == "placement-first"
+                                   for c in s["world"]["parked_cars"]), "elhelyezésazonosító megfigyelése")
+        self.control("link_failure", active=True)
+        self.wait_for(lambda s: s["controls"]["link_failure"], "kezelői út külön hibamódban")
+        removed = self.remove_parked("P01", "placement-first", "remove-first")
+        self.assertEqual(removed["parking_setup"]["kind"], "parked_removed")
+        empty = self.wait_for(lambda s: not s["world"]["parked_cars"]
+                             and self.slot(s, "P01").get("state") == "free",
+                             "eltávolítás a világban és a koordinátornál szünetben")
+        self.assertTrue(empty["paused"])
+        self.assertEqual(empty["sim_time"], 0)
+        self.assertEqual(empty["world"]["metrics"]["completed"], 0)
+        self.check("manual_removal_paused_works_during_vehicle_link_fault", {
+            "paused": empty["paused"], "sim_time": empty["sim_time"],
+            "static_cars": len(empty["world"]["parked_cars"]),
+            "slot_state": self.slot(empty, "P01")["state"]},
+            "MQTT-s eltávolítás szünet és jármű-életjelhiba mellett is konzisztens")
+
+        self.remove_parked("P01", "placement-first", "remove-first")
+        self.spawn("P01", "placement-second")
+        self.wait_for(lambda s: any(c.get("placement_id") == "placement-second"
+                                   for c in s["world"]["parked_cars"])
+                      and self.slot(s, "P01").get("placement_id") == "placement-second",
+                      "második elhelyezés ugyanazon a helyen")
+        self.spawn("P01", "placement-first")
+        self.remove_parked("P01", "placement-first", "remove-first")
+        rejected = self.remove_parked("P01", "placement-first", "stale-placement-removal")
+        self.assertEqual(rejected["parking_setup"]["kind"], "parking_setup_rejected")
+        current = self.wait_for(lambda s: len(s["world"]["parked_cars"]) == 1
+                                and s["world"]["parked_cars"][0].get("placement_id") == "placement-second"
+                                and self.slot(s, "P01").get("placement_id") == "placement-second",
+                                "régi elhelyezés és eltávolítás nem érinti az új autót")
+        self.assertEqual(current["world"]["metrics"]["completed"], 0)
+        self.check("replayed_setup_requests_cannot_resurrect_or_remove_new_placement", {
+            "current_placement_id": current["world"]["parked_cars"][0]["placement_id"],
+            "stale_removal_kind": rejected["parking_setup"]["kind"]},
+            "azonos hely új autóját sem régi kérés, sem régi elhelyezésazonosító nem módosítja")
+        removed = self.remove_parked("P01", "placement-second", "remove-second")
+        self.assertEqual(removed["parking_setup"]["kind"], "parked_removed")
+        self.wait_for(lambda s: not s["world"]["parked_cars"], "második autó eltávolítása")
+        self.wait_for(lambda s: len([e for e in s["events"] if e.get("type") == "parked_removed"]) == 2,
+                      "két tényleges eltávolítás eseménye, ismétlés nélkül")
+        records = [json.loads(line) for line in self.request("/api/export?kind=messages")[2].decode().splitlines()]
+        topics = {r["relative_topic"] for r in records
+                  if r["payload"].get("request_id") == "remove-second"}
+        self.assertTrue({"operator/control", "requests/parking_setup", "commands/parking_setup", "events"} <= topics)
+        self.check("manual_removal_control_mqtt_ack_and_event_are_exported", {
+            "request_id": "remove-second", "topics": sorted(topics)},
+            "kezelői kérés, MQTT-kérés, válasz és eltávolítási esemény visszakereshető")
+
+    def test_09_removal_releases_capacity_for_waiting_car_without_reset(self):
+        for index in range(1, 9):
+            slot_id = f"P{index:02d}"
+            self.spawn(slot_id, "full-" + slot_id)
+        full = self.wait_for(lambda s: len(s["world"]["parked_cars"]) == 8
+                             and all(slot["state"] == "occupied" for slot in s["coordinator"]["slots"]),
+                             "teljes kézi foglaltság")
+        run_id = full["run_id"]
+        self.control("speed", value=4)
+        self.control("resume")
+        self.wait_for(lambda s: self.car(s).get("state") == "requesting"
+                      and self.car(s).get("slot_id") is None, "autó kapacitásra vár")
+        self.remove_parked("P03", "full-P03", "release-capacity")
+        moving = self.wait_for(lambda s: self.car(s).get("slot_id") == "P03"
+                               and self.car(s).get("speed", 0) > 0
+                               and len(s["world"]["parked_cars"]) == 7
+                               and self.slot(s, "P03").get("car_id") == "CAR01",
+                               "várakozó autó a felszabadított helyre indul", timeout=6)
+        self.assertEqual(moving["run_id"], run_id)
+        self.assertEqual(moving["world"]["metrics"]["completed"], 0)
+        self.control("pause")
+        self.wait_for(lambda s: s["paused"], "megállított teszt a mozgó autó helyfoglalásával")
+        refused = self.remove_parked("P03", "full-P03", "cannot-remove-fleet-car")
+        self.assertEqual(refused["parking_setup"]["kind"], "parking_setup_rejected")
+        self.assertEqual(self.slot(self.state(), "P03")["car_id"], "CAR01")
+        self.check("full_capacity_manual_removal_resumes_waiting_car_without_reset", {
+            "run_id": run_id, "moving_car_slot": self.car(moving)["slot_id"],
+            "remaining_static_cars": len(moving["world"]["parked_cars"]),
+            "central_owner": self.slot(moving, "P03")["car_id"],
+            "fleet_removal_kind": refused["parking_setup"]["kind"]},
+            "futásazonosító változatlan; CAR01 P03-ra indul; a kiosztott flottajármű nem törölhető")
+
+    def test_10_old_run_controls_and_invalid_removal_are_rejected(self):
+        before = self.state()
+        controls = [{"action": "pause"}, {"action": "resume"}, {"action": "reset"},
+                    {"action": "speed", "value": 4}, {"action": "pedestrian", "active": True},
+                    {"action": "sensor_failure", "active": True}, {"action": "link_failure", "active": True},
+                    {"action": "spawn_parked", "slot_id": "P01"},
+                    {"action": "remove_parked", "slot_id": "P01", "placement_id": "old-placement"}]
+        for data in controls:
+            with self.assertRaises(HTTPError) as caught:
+                self.request("/api/control", dict(data, run_id="previous-run"))
+            self.assertEqual(caught.exception.code, 400)
+        for placement_id in (None, "", [], "invalid token"):
+            with self.assertRaises(HTTPError) as caught:
+                self.request("/api/control", {"action": "remove_parked", "slot_id": "P01",
+                                             "placement_id": placement_id, "run_id": before["run_id"]})
+            self.assertEqual(caught.exception.code, 400)
+        after = self.state()
+        self.assertEqual(after["run_id"], before["run_id"])
+        self.assertEqual(after["sim_time"], before["sim_time"])
+        self.assertEqual(after["controls"], before["controls"])
+        self.assertTrue(after["paused"])
+        self.check("all_operator_controls_reject_old_run_and_bad_removal_identity", {
+            "old_run_control_count": len(controls), "invalid_removal_count": 4,
+            "status": 400, "run_id_unchanged": True, "model_time_unchanged": True},
+            "régi futás vezérlései és hibás eltávolítási azonosítók nem módosítják az aktuális futást")
+
+    def test_11_commands_already_queued_before_reset_do_not_cross_runs(self):
+        before = self.state()
+        # A runtime ugyanazzal a lockkal vált futásazonosítót. Így determinisztikusan
+        # a reset mögé kerülnek a még a régi futásban elfogadott kezelőparancsok.
+        # Nincs helyettesített ütemező, modell vagy MQTT-kliens.
+        with self.app.lock:
+            self.app.command({"action": "reset", "run_id": before["run_id"]})
+            queued = [{"action": "resume"},
+                      {"action": "speed", "value": 1 if before["speed"] == 4 else 4},
+                      {"action": "pedestrian", "active": True},
+                      {"action": "sensor_failure", "active": True},
+                      {"action": "link_failure", "active": True},
+                      {"action": "spawn_parked", "slot_id": "P01", "request_id": "queued-before-reset"}]
+            for data in queued:
+                self.app.command(dict(data, run_id=before["run_id"]))
+        after = self.wait_for(lambda s: s["run_id"] != before["run_id"]
+                              and bool(s.get("world")) and bool(s.get("coordinator"))
+                              and s["connected"], "reset utáni megfigyelt és kapcsolt új futás", timeout=8)
+        self.assertTrue(after["paused"])
+        self.assertEqual(after["sim_time"], 0)
+        self.assertEqual(after["speed"], before["speed"])
+        self.assertTrue(all(not flag for flag in after["controls"].values()))
+        self.assertEqual(after["world"]["parked_cars"], [])
+        self.assertIsNone(after["parking_setup"])
+        self.check("already_accepted_controls_cannot_cross_a_queued_reset", {
+            "discarded_control_count": len(queued), "new_run_id": after["run_id"],
+            "paused": after["paused"], "sim_time": after["sim_time"],
+            "controls": after["controls"], "speed_unchanged": after["speed"] == before["speed"]},
+            "a reset előtt elfogadott, mögötte sorban álló régi parancsok kimaradnak az új futásban")
 
 
 def main():

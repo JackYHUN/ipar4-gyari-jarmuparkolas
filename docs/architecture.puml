@@ -23,16 +23,16 @@ rectangle "Helyi oktatási demonstrátor rendszerhatára" {
   process --> sensor : modellbeli környezet
   sensor --> vehicle : virtuális érzékelés
   vehicle --> process : sebesség / megállás
-  vehicle --> broker : helyigény, kézi elhelyezési igény,\ntelemetria, esemény, világállapot
-  broker --> vehicle : helyfoglalási / elhelyezési parancs
+  vehicle --> broker : helyigény, kézi elhelyezés / eltávolítás,\ntelemetria, esemény, világállapot
+  broker --> vehicle : helyfoglalási / foglaltságkezelési parancs
   coordinator --> broker : kiosztás, állapot, szívverés
-  broker --> coordinator : helyigény, kézi elhelyezés,\nparkolási esemény
+  broker --> coordinator : helyigény, kézi elhelyezés / eltávolítás,\nparkolási esemény
   broker --> watchdog : fogadott szívverés
   watchdog --> vehicle : kapcsolat érvényessége
   broker --> observer : világ, koordinátor, telemetria, esemény
   observer --> log : teljes fogadott forgalom
   observer --> ui : megfigyelt állapot
-  ui --> vehicle : hibainjektálás / futásvezérlés /\nmár parkoló autó elhelyezési kérése
+  ui --> vehicle : aktuális futáshoz kötött vezérlés /\nkézi parkolófoglaltság módosítása
 }
 
 user --> ui : indítás, megfigyelés, export

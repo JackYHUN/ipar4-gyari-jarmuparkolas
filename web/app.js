@@ -7,7 +7,7 @@ let messageHistory = [], historyRun = null;
 const seenMessages = new Set();
 const pendingControls = new Map();
 let controlError = "", transportError = "";
-let pendingSpawn = null, parkingSetupRun = null, spawnSequence = 0;
+let pendingParking = null, parkingSetupRun = null, spawnSequence = 0;
 let parkingSetupMessage = "", parkingSetupTone = "";
 const esc = (value) => String(value ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const num = (v, fallback = 0) => typeof v === "number" && Number.isFinite(v) ? v : fallback;
@@ -35,36 +35,61 @@ function freeParkingSlots(next = state) {
   const central = new Map(centralSlots.map(slot => [slot.id, slot]));
   return worldSlots.filter(slot => slot.state === "free" && central.get(slot.id)?.state === "free");
 }
+function removableParkedCars(next = state) {
+  const cars = next?.world?.parked_cars, slots = next?.coordinator?.slots;
+  if (!Array.isArray(cars) || !Array.isArray(slots)) return [];
+  return cars.filter(car => car.origin === "preparked" && typeof car.placement_id === "string" && car.placement_id
+    && (car.id || car.car_id) === `PARK-${car.slot_id}`
+    && slots.some(slot => slot.id === car.slot_id && slot.state === "occupied"
+      && slot.car_id === (car.id || car.car_id) && slot.placement_id === car.placement_id));
+}
 function syncParkingSetup() {
-  const unavailable = !state || Boolean(transportError) || pendingControls.has("reset") || Boolean(pendingSpawn);
+  const unavailable = !state || Boolean(transportError) || pendingControls.has("reset") || Boolean(pendingParking);
   $("parked-slot").disabled = unavailable || !freeParkingSlots().length;
   $("spawn-parked").disabled = unavailable || !freeParkingSlots().some(slot => slot.id === $("parked-slot").value);
-  $("spawn-parked").setAttribute("aria-busy", String(Boolean(pendingSpawn)));
+  $("remove-parked-slot").disabled = unavailable || !removableParkedCars().length;
+  $("remove-parked").disabled = unavailable || !removableParkedCars().some(car => car.slot_id === $("remove-parked-slot").value);
+  $("spawn-parked").setAttribute("aria-busy", String(pendingParking?.operation === "spawn"));
+  $("remove-parked").setAttribute("aria-busy", String(pendingParking?.operation === "remove"));
 }
 function settleParkingSetup(next) {
   if (parkingSetupRun !== next.run_id) {
     parkingSetupRun = next.run_id;
-    pendingSpawn = null; parkingSetupMessage = ""; parkingSetupTone = "";
+    pendingParking = null; parkingSetupMessage = ""; parkingSetupTone = "";
   }
-  if (!pendingSpawn) return;
+  if (!pendingParking) return;
   const ack = next.parking_setup;
-  if (ack?.run_id === pendingSpawn.runId && ack.request_id === pendingSpawn.requestId) {
+  if (ack?.run_id === pendingParking.runId && ack.request_id === pendingParking.requestId
+      && ack.slot_id === pendingParking.slotId && ack.operation === pendingParking.operation
+      && ack.placement_id === pendingParking.placementId && ack.car_id === `PARK-${pendingParking.slotId}`) {
     if (ack.kind === "parking_setup_rejected") {
-      parkingSetupMessage = ack.message || "A parkolóhely már nem szabad. Válassz másik helyet.";
-      parkingSetupTone = "error"; pendingSpawn = null;
-    } else if (ack.kind === "parked_spawned" && ack.slot_id === pendingSpawn.slotId) {
-      const observed = next.world?.parked_cars?.some(car => car.slot_id === ack.slot_id && (car.id || car.car_id) === ack.car_id);
-      const occupied = next.coordinator?.slots?.some(slot => slot.id === ack.slot_id && slot.state === "occupied" && slot.car_id === ack.car_id);
+      parkingSetupMessage = ack.message || "A foglaltság időközben megváltozott. Ellenőrizd a parkolóhelyet.";
+      parkingSetupTone = "error"; pendingParking = null;
+    } else if (pendingParking.operation === "spawn" && ack.kind === "parked_spawned") {
+      const observed = next.world?.parked_cars?.some(car => car.slot_id === ack.slot_id
+        && (car.id || car.car_id) === ack.car_id && car.placement_id === ack.placement_id);
+      const occupied = next.coordinator?.slots?.some(slot => slot.id === ack.slot_id && slot.state === "occupied"
+        && slot.car_id === ack.car_id && slot.placement_id === ack.placement_id);
       // HTTP acceptance and the acknowledgement alone do not invent an observed vehicle.
       if (observed && occupied) {
         parkingSetupMessage = `${ack.car_id} elhelyezve: ${ack.slot_id}. A hely foglalt.`;
-        parkingSetupTone = "success"; pendingSpawn = null;
+        parkingSetupTone = "success"; pendingParking = null;
+      }
+    } else if (pendingParking.operation === "remove" && ack.kind === "parked_removed") {
+      const cars = next.world?.parked_cars, slots = next.coordinator?.slots;
+      const observedAbsent = Array.isArray(cars) && !cars.some(car => car.slot_id === ack.slot_id && car.placement_id === ack.placement_id);
+      const central = Array.isArray(slots) && slots.find(slot => slot.id === ack.slot_id);
+      // A waiting arriving car may reserve the freed bay before the next UI poll.
+      const released = central && !(central.state === "occupied" && central.placement_id === ack.placement_id);
+      if (observedAbsent && released) {
+        parkingSetupMessage = `${ack.car_id} eltávolítva: ${ack.slot_id}. A foglaltság frissült.`;
+        parkingSetupTone = "success"; pendingParking = null;
       }
     }
   }
-  if (pendingSpawn && Date.now() - pendingSpawn.started > 8000) {
-    pendingSpawn = null;
-    parkingSetupMessage = "Az elhelyezés visszaigazolása nem érkezett meg. Ellenőrizd a foglaltságot új kérés előtt.";
+  if (pendingParking && Date.now() - pendingParking.started > 8000) {
+    pendingParking = null;
+    parkingSetupMessage = "A parkolóbeállítás visszaigazolása nem érkezett meg. Ellenőrizd a foglaltságot új kérés előtt.";
     parkingSetupTone = "error";
   }
 }
@@ -77,35 +102,57 @@ function renderParkingSetup() {
     select.innerHTML = markup;
     select.value = choices.some(slot => slot.id === previous) ? previous : choices[0]?.id || "";
   }
+  const removable = removableParkedCars(), removeSelect = $("remove-parked-slot");
+  const previousRemoval = removeSelect.value;
+  const removalMarkup = removable.length ? removable.map(car => `<option value="${esc(car.slot_id)}">${esc(car.slot_id)} · ${esc(car.id || car.car_id)}</option>`).join("")
+    : '<option value="">Nincs eltávolítható álló autó</option>';
+  if (removeSelect.innerHTML !== removalMarkup) {
+    removeSelect.innerHTML = removalMarkup;
+    removeSelect.value = removable.some(car => car.slot_id === previousRemoval) ? previousRemoval : removable[0]?.slot_id || "";
+  }
   const parked = state?.world?.parked_cars;
   set("parked-count", Array.isArray(parked) ? `${parked.length} helyben álló` : "Még nincs minta");
-  const message = transportError ? "Nincs friss kapcsolat. Az elhelyezéshez friss foglaltsági adat szükséges."
+  const resultMessage = parkingSetupMessage && parkingSetupTone === "success" && !choices.length && removable.length
+    ? `${parkingSetupMessage} Egy kézzel elhelyezett autó eltávolításával helyet szabadíthatsz fel.` : parkingSetupMessage;
+  const message = transportError ? "Nincs friss kapcsolat. A parkolóbeállításhoz friss foglaltsági adat szükséges."
     : pendingControls.has("reset") ? "Új futás indul; a parkolóelrendezés törlődik."
-    : pendingSpawn ? `${pendingSpawn.slotId}: elhelyezés kérése elküldve, MQTT-visszaigazolásra vár…`
-    : parkingSetupMessage || (choices.length ? "Válassz helyet, majd helyezz el egy álló autót. Az új futás törli az elhelyezett autókat."
-      : state?.world?.map?.slots && state?.coordinator?.slots ? "Nincs szabad hely. Új futással törölheted az elhelyezett autókat." : "A parkolókezelő és a világmodell első mintájára vár.");
+    : pendingParking ? `${pendingParking.slotId}: ${pendingParking.operation === "remove" ? "eltávolítás" : "elhelyezés"} kérése elküldve, MQTT-visszaigazolásra vár…`
+    : resultMessage || (choices.length ? "Elhelyezéssel vagy eltávolítással változtathatod a már itt álló autókat. Az új futás az egész elrendezést törli."
+      : state?.world?.map?.slots && state?.coordinator?.slots ? removable.length ? "Nincs szabad hely. Egy kézzel elhelyezett autó eltávolításával helyet szabadíthatsz fel."
+        : "Nincs szabad hely és nincs eltávolítható kézi autó. Új futást indíthatsz." : "A parkolókezelő és a világmodell első mintájára vár.");
   if ($("parked-status").textContent !== message) set("parked-status", message);
-  $("parked-status").dataset.tone = transportError ? "error" : pendingSpawn ? "pending" : parkingSetupTone;
+  $("parked-status").dataset.tone = transportError ? "error" : pendingParking ? "pending" : parkingSetupTone;
   syncParkingSetup();
 }
 function spawnParked() {
   const slotId = $("parked-slot").value;
-  if (!state || transportError || pendingSpawn || pendingControls.has("reset") || !freeParkingSlots().some(slot => slot.id === slotId)) return controlQueue;
+  if (!freeParkingSlots().some(slot => slot.id === slotId)) return controlQueue;
+  return parkingRequest("spawn", slotId);
+}
+function removeParked() {
+  const car = removableParkedCars().find(car => car.slot_id === $("remove-parked-slot").value);
+  if (!car) return controlQueue;
+  return parkingRequest("remove", car.slot_id, car.placement_id);
+}
+function parkingRequest(operation, slotId, placementId) {
+  if (!state || transportError || pendingParking || pendingControls.has("reset")) return controlQueue;
   const requestId = globalThis.crypto?.randomUUID?.() || `parked-${Date.now()}-${++spawnSequence}-${Math.random().toString(16).slice(2)}`;
-  const pending = {runId:state.run_id, requestId, slotId, started:Date.now()};
-  pendingSpawn = pending; parkingSetupMessage = ""; parkingSetupTone = "";
+  const pending = {operation, runId:state.run_id, requestId, slotId, placementId:operation === "spawn" ? requestId : placementId, started:Date.now()};
+  pendingParking = pending; parkingSetupMessage = ""; parkingSetupTone = "";
   renderParkingSetup();
   controlQueue = controlQueue.then(async () => {
-    if (pendingSpawn !== pending || state?.run_id !== pending.runId) return;
+    if (pendingParking !== pending || state?.run_id !== pending.runId) return;
     try {
+      const body = {action:operation === "remove" ? "remove_parked" : "spawn_parked",slot_id:slotId,request_id:requestId,run_id:pending.runId};
+      if (operation === "remove") body.placement_id = placementId;
       const response = await fetch("/api/control", {method:"POST", headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({action:"spawn_parked",slot_id:slotId,request_id:requestId,run_id:pending.runId}), signal:AbortSignal.timeout(5000)});
+        body:JSON.stringify(body), signal:AbortSignal.timeout(5000)});
       const result = await response.json();
-      if (!response.ok) throw new Error(result.error || "Az autó elhelyezésének kérése nem sikerült.");
-      if (result.request_id !== requestId) throw new Error("Az elhelyezési kérés azonosítója nem egyezik a válasszal.");
+      if (!response.ok) throw new Error(result.error || "A parkolóbeállítás kérése nem sikerült.");
+      if (result.request_id !== requestId) throw new Error("A parkolóbeállítás kérésazonosítója nem egyezik a válasszal.");
     } catch (error) {
-      if (pendingSpawn !== pending) return;
-      pendingSpawn = null; parkingSetupMessage = error.message; parkingSetupTone = "error";
+      if (pendingParking !== pending) return;
+      pendingParking = null; parkingSetupMessage = error.message; parkingSetupTone = "error";
       renderParkingSetup();
     }
   });
@@ -113,6 +160,10 @@ function spawnParked() {
 }
 function settleControls(next) {
   for (const [key, pending] of pendingControls) {
+    if (key !== "reset" && next.run_id !== pending.runId) {
+      pendingControls.delete(key);
+      continue;
+    }
     const actual = key === "reset" ? next.run_id !== pending.runId
       : key === "paused" ? next.paused : key === "speed" ? next.speed : next.controls?.[key];
     if ((key === "reset" && actual) || (key !== "reset" && actual === pending.expected)) {
@@ -125,18 +176,22 @@ function settleControls(next) {
 }
 function control(action, data = {}) {
   const key = controlKey(action);
-  if (!state || pendingControls.has(key) || pendingControls.has("reset")) return controlQueue;
+  if (!state || transportError || pendingControls.has(key) || pendingControls.has("reset")) return controlQueue;
   const expected = key === "paused" ? action === "pause" : key === "speed" ? data.value : data.active;
-  pendingControls.set(key, {expected, runId:state.run_id, started:Date.now()});
+  const pending = {expected, runId:state.run_id, started:Date.now()};
+  pendingControls.set(key, pending);
   syncPendingControls();
   // Different controls stay ordered; the same control waits for the received acknowledgement.
   controlQueue = controlQueue.then(async () => {
+    if (pendingControls.get(key) !== pending || state?.run_id !== pending.runId) return;
     try {
-      const response = await fetch("/api/control", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action,...data}),signal:AbortSignal.timeout(5000)});
+      const response = await fetch("/api/control", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action,...data,run_id:pending.runId}),signal:AbortSignal.timeout(5000)});
       const result = await response.json();
+      if (pendingControls.get(key) !== pending || state?.run_id !== pending.runId) return;
       if (!response.ok) throw new Error(result.error || "A művelet nem sikerült.");
       controlError = "";
     } catch (error) {
+      if (pendingControls.get(key) !== pending || state?.run_id !== pending.runId) return;
       pendingControls.delete(key);
       controlError = error.message;
       showError(controlError);
@@ -150,6 +205,8 @@ $("play").addEventListener("click", () => control(state?.paused ? "resume" : "pa
 $("reset").addEventListener("click", () => control("reset"));
 $("spawn-parked").addEventListener("click", spawnParked);
 $("parked-slot").addEventListener("change", syncParkingSetup);
+$("remove-parked").addEventListener("click", removeParked);
+$("remove-parked-slot").addEventListener("change", syncParkingSetup);
 document.querySelectorAll("[data-speed]").forEach(button => button.addEventListener("click", () => control("speed", {value:Number(button.dataset.speed)})));
 document.querySelectorAll("[data-action]").forEach(button => button.addEventListener("click", () => control(button.dataset.action, {active:!state?.controls?.[button.dataset.action]})));
 $("car-select").addEventListener("change", event => selectCar(event.target.value));

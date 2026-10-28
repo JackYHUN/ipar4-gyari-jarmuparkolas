@@ -43,7 +43,8 @@ def _config(config):
 
 def _slots(count):
     return [{"id": f"P{i + 1:02d}", "x": 14 + 5 * i, "y": 7,
-             "state": "free", "car_id": None, "reservation_id": None}
+             "state": "free", "car_id": None, "reservation_id": None,
+             "placement_id": None}
             for i in range(count)]
 
 
@@ -153,18 +154,27 @@ class World(_Producer):
 
     def request_parked_car(self, slot_id, request_id):
         """Kezdeti foglaltság módosításának kérése; a döntést a koordinátor hozza."""
+        return self._request_parking_setup(slot_id, request_id, "spawn", request_id)
+
+    def request_parked_removal(self, slot_id, request_id, placement_id):
+        """Csak a megnevezett, kézzel elhelyezett járműpéldány eltávolítása."""
+        return self._request_parking_setup(slot_id, request_id, "remove", placement_id)
+
+    def _request_parking_setup(self, slot_id, request_id, operation, placement_id):
         if (not isinstance(slot_id, str) or re.fullmatch(r"P[0-9]{2}", slot_id) is None
-                or not isinstance(request_id, str) or not request_id or len(request_id) > 160):
+                or not isinstance(request_id, str) or not request_id or len(request_id) > 160
+                or not isinstance(placement_id, str) or not placement_id or len(placement_id) > 160):
             raise ValueError("Hibás parkolóhely- vagy kérésazonosító")
         existing = self._parking_setup.get(request_id)
-        if existing is not None and existing["slot_id"] != slot_id:
-            raise ValueError("A kérésazonosító már másik parkolóhelyhez tartozik")
+        identity = {"slot_id": slot_id, "operation": operation, "placement_id": placement_id}
+        if existing is not None and any(existing[key] != value for key, value in identity.items()):
+            raise ValueError("A kérésazonosító már másik parkolóbeállításhoz tartozik")
         if existing is None:
             if len(self._parking_setup) >= 256:
                 raise ValueError("A futás parkolóbeállítási kéréskerete betelt; indíts új futást")
-            self._parking_setup[request_id] = {"slot_id": slot_id, "seq": 0, "kind": None}
-        return self._emit("requests/parking_setup", {
-            "request_id": request_id, "slot_id": slot_id, "car_id": "PARK-" + slot_id})
+            self._parking_setup[request_id] = identity | {"seq": 0, "kind": None}
+        return self._emit("requests/parking_setup", identity | {
+            "request_id": request_id, "car_id": "PARK-" + slot_id})
 
     def _handle_parking_setup(self, payload):
         request_id = payload.get("request_id")
@@ -172,30 +182,57 @@ class World(_Producer):
             return False
         pending = self._parking_setup.get(request_id)
         kind, slot_id = payload.get("kind"), payload.get("slot_id")
+        operation = payload.get("operation", "spawn")
+        placement_id = payload.get("placement_id", request_id if operation == "spawn" else None)
         if (pending is None or pending["slot_id"] != slot_id
                 or payload["seq"] <= pending["seq"]
-                or kind not in ("parked_spawned", "parking_setup_rejected")
+                or operation != pending["operation"] or placement_id != pending["placement_id"]
+                or kind not in ("parked_spawned", "parked_removed", "parking_setup_rejected")
+                or (kind == "parked_spawned" and operation != "spawn")
+                or (kind == "parked_removed" and operation != "remove")
                 or payload.get("car_id") != "PARK-" + slot_id
                 or not isinstance(payload.get("message"), str)
                 or (pending["kind"] is not None and kind != pending["kind"])):
             return False
+        # A QoS 1 ismétlés ugyanazt az eredményt adhatja új sorszámmal. Egy
+        # lezárt kérés mellékhatása későbbi törlés/újraelhelyezés után sem ismétlődik.
+        if pending["kind"] is not None:
+            pending["seq"] = payload["seq"]
+            return True
         if kind == "parked_spawned":
             slot = next((s for s in self.slots if s["id"] == slot_id), None)
             if (slot is None or any(payload.get(key) != value for key, value in
                                     (("x", slot["x"]), ("y", slot["y"]), ("heading", -90)))
                     or (slot["state"] != "free" and not
-                        (slot["state"] == "occupied" and slot["car_id"] == payload["car_id"]))):
+                        (slot["state"] == "occupied" and slot["car_id"] == payload["car_id"]
+                         and slot.get("placement_id") == placement_id))):
                 return False
             if not any(car["id"] == payload["car_id"] for car in self.parked_cars):
                 self.parked_cars.append({"id": payload["car_id"], "car_id": payload["car_id"],
                                          "slot_id": slot_id, "x": slot["x"], "y": slot["y"],
-                                         "heading": -90, "state": "parked", "origin": "preparked"})
-                slot.update(state="occupied", car_id=payload["car_id"], reservation_id=None)
+                                         "heading": -90, "state": "parked", "origin": "preparked",
+                                         "placement_id": placement_id})
+                slot.update(state="occupied", car_id=payload["car_id"], reservation_id=None,
+                            placement_id=placement_id)
                 self._event(kind, message=payload["message"], car_id=payload["car_id"],
-                            slot_id=slot_id, request_id=payload["request_id"])
-        elif pending["kind"] is None:
+                            slot_id=slot_id, request_id=request_id, placement_id=placement_id)
+        elif kind == "parked_removed":
+            slot = next((s for s in self.slots if s["id"] == slot_id), None)
+            car = next((c for c in self.parked_cars if c["slot_id"] == slot_id
+                        and c["id"] == payload["car_id"]
+                        and c.get("placement_id") == placement_id), None)
+            if (slot is None or car is None or slot["state"] != "occupied"
+                    or slot["car_id"] != payload["car_id"]
+                    or slot.get("placement_id") != placement_id):
+                return False
+            self.parked_cars.remove(car)
+            slot.update(state="free", car_id=None, reservation_id=None, placement_id=None)
             self._event(kind, message=payload["message"], car_id=payload["car_id"],
-                        slot_id=slot_id, request_id=payload["request_id"])
+                        slot_id=slot_id, request_id=request_id, placement_id=placement_id)
+        else:
+            self._event(kind, message=payload["message"], car_id=payload["car_id"],
+                        slot_id=slot_id, request_id=request_id, operation=operation,
+                        placement_id=placement_id)
         pending.update(seq=payload["seq"], kind=kind)
         return True
 
@@ -378,17 +415,24 @@ class Coordinator(_Producer):
 
     def _handle_parking_setup(self, payload):
         request_id, slot_id = payload.get("request_id"), payload.get("slot_id")
+        operation = payload.get("operation", "spawn")
+        placement_id = payload.get("placement_id", request_id if operation == "spawn" else None)
         if (not isinstance(request_id, str) or not request_id or len(request_id) > 160
                 or not isinstance(slot_id, str) or re.fullmatch(r"P[0-9]{2}", slot_id) is None
-                or payload.get("car_id") != "PARK-" + slot_id):
+                or payload.get("car_id") != "PARK-" + slot_id
+                or operation not in ("spawn", "remove")
+                or not isinstance(placement_id, str) or not placement_id or len(placement_id) > 160
+                or (operation == "spawn" and placement_id != request_id)):
             return []
         self.sim_time = max(self.sim_time, payload["sim_time"])
         result = {"kind": "parking_setup_rejected", "request_id": request_id,
-                  "slot_id": slot_id, "car_id": "PARK-" + slot_id}
+                  "slot_id": slot_id, "car_id": "PARK-" + slot_id,
+                  "operation": operation, "placement_id": placement_id}
         existing = self._parking_setup.get(request_id)
         if existing is not None:
-            result = (existing if existing["slot_id"] == slot_id else
-                      result | {"message": "A kérésazonosító már másik parkolóhelyhez tartozik."})
+            result = (existing if all(existing[key] == result[key] for key in
+                                     ("slot_id", "operation", "placement_id")) else
+                      result | {"message": "A kérésazonosító már másik parkolóbeállításhoz tartozik."})
         else:
             slot = next((s for s in self.slots if s["id"] == slot_id), None)
             if payload["seq"] <= self._last_setup_seq:
@@ -397,10 +441,18 @@ class Coordinator(_Producer):
                 result["message"] = "A futás kéréskerete betelt; indíts új futást."
             elif slot is None:
                 result["message"] = "Ismeretlen parkolóhely."
+            elif operation == "remove":
+                if (slot["state"] == "occupied" and slot["car_id"] == result["car_id"]
+                        and slot.get("placement_id") == placement_id):
+                    slot.update(state="free", car_id=None, reservation_id=None, placement_id=None)
+                    result.update(kind="parked_removed", message="A kézzel elhelyezett jármű eltávolítva; a hely felszabadult.")
+                else:
+                    result["message"] = "Csak a megadott, kézzel elhelyezett autó távolítható el."
             elif slot["state"] != "free":
                 result["message"] = "A parkolóhely foglalt vagy már le van foglalva."
             else:
-                slot.update(state="occupied", car_id=result["car_id"], reservation_id=None)
+                slot.update(state="occupied", car_id=result["car_id"], reservation_id=None,
+                            placement_id=placement_id)
                 result.update(kind="parked_spawned", x=slot["x"], y=slot["y"], heading=-90,
                               message="A már parkoló jármű bekerült a foglaltsági nyilvántartásba.")
             self._last_setup_seq = max(self._last_setup_seq, payload["seq"])
