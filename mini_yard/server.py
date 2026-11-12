@@ -2,56 +2,136 @@
 import csv
 import io
 import json
+import re
+import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
+
+from .protocol import strict_json
+from .runtime import RuntimeUnavailable
+
+
+HTTP_CONNECTION_LIMIT = 16
+HTTP_IO_TIMEOUT_S = 5
+HTTP_BODY_TIMEOUT_S = 3
+
+
+class _LocalHTTPServer(ThreadingHTTPServer):
+    def __init__(self, address, handler):
+        self._request_slots = threading.BoundedSemaphore(HTTP_CONNECTION_LIMIT)
+        super().__init__(address, handler)
+
+    def process_request(self, request, client_address):
+        if not self._request_slots.acquire(blocking=False):
+            try:
+                request.setblocking(False)
+                request.send(b"HTTP/1.0 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
+            except OSError:
+                pass
+            finally:
+                self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._request_slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._request_slots.release()
 
 
 def make_server(app, port):
     class Handler(BaseHTTPRequestHandler):
+        timeout = HTTP_IO_TIMEOUT_S
+
         def log_message(self, *args):
             pass
 
-        def send(self, status, content, kind="application/json; charset=utf-8", filename=None):
-            body = content.encode("utf-8") if isinstance(content, str) else content
+        def parse_request(self):
+            if not super().parse_request():
+                return False
+            host = self.headers.get_all("Host", [])
+            port = self.server.server_port
+            authorities = {f"{name}:{port}" for name in ("127.0.0.1", "localhost")}
+            if port == 80:
+                authorities.update(("127.0.0.1", "localhost"))
+            # Read the raw target because BaseHTTPRequestHandler normalizes "//".
+            target = self.requestline.split()[1]
+            authority = host[0].strip(" \t").lower() if len(host) == 1 else None
+            if (authority not in authorities or not target.startswith("/")
+                    or target.startswith("//") or "\\" in target):
+                self.send(403, '{"error":"Érvénytelen helyi cím"}')
+                return False
+            self.authority = authority
+            return True
+
+        def headers_for(self, status, kind, filename=None, length=None):
             self.send_response(status)
             self.send_header("Content-Type", kind)
-            self.send_header("Content-Length", str(len(body)))
+            if length is not None:
+                self.send_header("Content-Length", str(length))
+            else:
+                self.send_header("Connection", "close")
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Cross-Origin-Resource-Policy", "same-origin")
             if filename:
                 self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
             self.end_headers()
+
+        def send(self, status, content, kind="application/json; charset=utf-8", filename=None):
+            body = content.encode("utf-8") if isinstance(content, str) else content
             try:
+                self.headers_for(status, kind, filename, len(body))
                 self.wfile.write(body)
-            except (BrokenPipeError, ConnectionResetError):
+            except (BrokenPipeError, ConnectionResetError, TimeoutError):
                 pass
+
+        def stream(self, chunks, kind, filename):
+            self.close_connection = True
+            try:
+                self.headers_for(200, kind, filename)
+                for chunk in chunks:
+                    self.wfile.write(chunk.encode("utf-8") if isinstance(chunk, str) else chunk)
+            except (BrokenPipeError, ConnectionResetError, TimeoutError):
+                pass
+
+        def export(self, kind):
+            run_id, path, size = app.export_source()
+            if kind == "messages":
+                def chunks():
+                    with path.open("rb") as handle:
+                        remaining = size
+                        while remaining and (data := handle.read(min(remaining, 65536))):
+                            remaining -= len(data)
+                            yield data
+                return self.stream(chunks(), "application/x-ndjson; charset=utf-8", f"{run_id}-mqtt.jsonl")
+            records = app.export_records(path, size)
+            if kind == "events":
+                def rows():
+                    prefix = "["
+                    for row in records:
+                        if row["relative_topic"] in ("events", "operator/control", "operator/control_event"):
+                            yield prefix + json.dumps(row, ensure_ascii=False, allow_nan=False)
+                            prefix = ",\n"
+                    yield "[]" if prefix == "[" else "]"
+                return self.stream(rows(), "application/json; charset=utf-8", f"{run_id}-events.json")
+            return self.stream(telemetry_csv(records), "text/csv; charset=utf-8", f"{run_id}-telemetry.csv")
 
         def do_GET(self):
             url = urlsplit(self.path)
             if url.path == "/api/state":
-                return self.send(200, json.dumps(app.state(), ensure_ascii=False))
+                return self.send(200, json.dumps(app.state(), ensure_ascii=False, allow_nan=False))
             if url.path == "/api/export":
                 kind = parse_qs(url.query).get("kind", ["messages"])[0]
                 if kind not in ("messages", "telemetry", "events"):
                     return self.send(400, '{"error":"Ismeretlen export"}')
-                records = app.export_records()
-                run_id = records[0]["payload"]["run_id"] if records else app.state()["run_id"]
-                if kind == "messages":
-                    body = "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records)
-                    return self.send(200, body, "application/x-ndjson; charset=utf-8", f"{run_id}-mqtt.jsonl")
-                if kind == "events":
-                    rows = [r for r in records if r["relative_topic"] in ("events", "operator/control")]
-                    return self.send(200, json.dumps(rows, ensure_ascii=False, indent=2), filename=f"{run_id}-events.json")
-                stream = io.StringIO(newline="")
-                writer = csv.writer(stream)
-                writer.writerow(["received_utc", "run_id", "seq", "sim_time_s", "car_id", "state", "x_m", "y_m", "speed_mps", "distance_m", "slot_id", "sensor_valid", "pedestrian", "reason", "stop_pedestrian_s", "stop_sensor_failure_s", "stop_communication_s"])
-                for record in records:
-                    if record["relative_topic"].startswith("telemetry/"):
-                        p = record["payload"]
-                        sensor = p.get("sensor", {})
-                        stops = p.get("stop_time_s", {})
-                        writer.writerow([record["received_utc"], p.get("run_id"), p.get("seq"), p.get("sim_time"), p.get("car_id"), p.get("state"), p.get("x"), p.get("y"), p.get("speed"), p.get("distance_m"), p.get("slot_id"), sensor.get("valid"), sensor.get("pedestrian"), p.get("reason"), stops.get("pedestrian"), stops.get("sensor_failure"), stops.get("communication")])
-                return self.send(200, "\ufeff" + stream.getvalue(), "text/csv; charset=utf-8", f"{run_id}-telemetry.csv")
+                return self.export(kind)
             files = {"/": ("index.html", "text/html"), "/app.js": ("app.js", "text/javascript"),
                      "/style.css": ("style.css", "text/css")}
             if url.path in files:
@@ -59,25 +139,78 @@ def make_server(app, port):
                 return self.send(200, (app.root / "web" / name).read_bytes(), mime + "; charset=utf-8")
             self.send(404, '{"error":"Nincs ilyen oldal"}')
 
+        def read_control_body(self, length):
+            deadline = time.monotonic() + HTTP_BODY_TIMEOUT_S
+            body = bytearray()
+            try:
+                while len(body) < length:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError
+                    self.connection.settimeout(remaining)
+                    chunk = self.rfile.read1(length - len(body))
+                    if not chunk:
+                        raise ValueError("Hiányos kéréstörzs")
+                    body.extend(chunk)
+            finally:
+                self.connection.settimeout(self.timeout)
+            return body
+
         def do_POST(self):
             if urlsplit(self.path).path != "/api/control":
                 return self.send(404, '{"error":"Nincs ilyen művelet"}')
-            # Controls come from this local page only, not a foreign website.
-            origin = self.headers.get("Origin")
-            if origin and origin != f"http://{self.headers.get('Host')}":
+            # Host has already been checked against the listening socket.
+            origins = self.headers.get_all("Origin", [])
+            origin = f"http://{self.authority.removesuffix(':80') if self.server.server_port == 80 else self.authority}"
+            if origins not in ([], [origin]):
                 return self.send(403, '{"error":"Eltérő eredetű kérés"}')
+            if self.headers.get_content_type() != "application/json":
+                return self.send(415, '{"error":"application/json szükséges"}')
             try:
                 length = int(self.headers.get("Content-Length", "0"))
                 if not 0 < length <= 2048:
                     raise ValueError("Hibás kérésméret")
-                data = json.loads(self.rfile.read(length))
+                data = strict_json(self.read_control_body(length))
                 if not isinstance(data, dict):
                     raise ValueError("JSON objektum szükséges")
                 result = app.command(data)
                 self.send(202, json.dumps({"ok": True, "queued": True, **(result or {})}))
-            except (ValueError, TypeError) as error:
+            except RuntimeUnavailable as error:
+                self.send(503, json.dumps({"error": str(error)}, ensure_ascii=False))
+            except TimeoutError:
+                self.close_connection = True
+                self.send(408, '{"error":"Kéréstörzs olvasási időtúllépés"}')
+            except (ValueError, TypeError, RecursionError) as error:
                 self.send(400, json.dumps({"error": str(error)}, ensure_ascii=False))
 
-    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
-    server.daemon_threads = True
-    return server
+    return _LocalHTTPServer(("127.0.0.1", port), Handler)
+
+
+def safe_csv_cell(value):
+    if isinstance(value, str):
+        leading = re.sub(r"^[\s\ufeff]+", "", value)
+        if value.startswith(("\t", "\r", "\n")) or leading.startswith(("=", "+", "-", "@", "＝", "＋", "－", "＠")):
+            return "'" + value
+    return value
+
+
+def telemetry_csv(records):
+    stream = io.StringIO(newline="")
+    writer = csv.writer(stream)
+    writer.writerow(["received_utc", "run_id", "seq", "sim_time_s", "car_id", "state", "x_m", "y_m",
+                     "speed_mps", "distance_m", "slot_id", "sensor_valid", "pedestrian", "reason",
+                     "stop_pedestrian_s", "stop_sensor_failure_s", "stop_communication_s"])
+    yield "\ufeff" + stream.getvalue()
+    for record in records:
+        if not record["relative_topic"].startswith("telemetry/"):
+            continue
+        stream.seek(0)
+        stream.truncate()
+        p = record["payload"]
+        sensor, stops = p.get("sensor", {}), p.get("stop_time_s", {})
+        row = [record["received_utc"], *(p.get(k) for k in (
+            "run_id", "seq", "sim_time", "car_id", "state", "x", "y", "speed", "distance_m", "slot_id")),
+            sensor.get("valid"), sensor.get("pedestrian"), p.get("reason"), stops.get("pedestrian"),
+            stops.get("sensor_failure"), stops.get("communication")]
+        writer.writerow(map(safe_csv_cell, row))
+        yield stream.getvalue()

@@ -58,4 +58,4 @@ Az új futás szüneteltetve indul: a gyalogos beállítása után az indítás 
 
 ## Következő tanulási feladat
 
-Állíts össze saját mérési kérdést a parkolókapacitásról. Előre rögzítsd a beállításokat, a futás végét és a mutatókat; a várakozó autókat is szerepeltesd az értékelésben. Ennél a determinisztikus modellnél azonos beállítás ismétlése önmagában nem hoz független statisztikai mintát. A még hiányzó statisztikai kampány tervét külön kell kidolgozni, a valódi saját értelmezést pedig a hallgatónak kell megfogalmaznia.
+A [mérési módszer](MERESI_MODSZER.md) alapján ismételj meg egy rövid saját válaszidővizsgálatot, és fogalmazd meg az eredmény értelmezését. Magyarázd el, miért a futáspár az elemzési egység, miért kell a nyugta mellett az állapot-egyezés, és miért nem jelent a lekérdezési szünet ugyanilyen mérési pontosságot. Azonos determinisztikus mozgás ismétlése nem hozna független folyamatmintákat. A ténylegesen elvégzett saját vizsgálatot a munkanaplóban rögzítsd; a már mellékelt AI-támogatású kampány nem válik ettől utólag önálló hallgatói munkává.

@@ -26,6 +26,7 @@ from urllib.request import Request, urlopen
 
 import paho.mqtt.client as mqtt
 
+from mini_yard.broker import LocalBroker
 from mini_yard.model import DEFAULT_CONFIG
 from mini_yard.runtime import Application
 from mini_yard.server import make_server
@@ -65,7 +66,9 @@ class RealMqttHttpIntegration(unittest.TestCase):
     def setUpClass(cls):
         cls.temporary = tempfile.TemporaryDirectory(prefix="mini-yard-integration-")
         cls.root = Path(cls.temporary.name)
-        cls.app = Application(copy.deepcopy(DEFAULT_CONFIG), cls.root,
+        cls.test_config = json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
+        shutil.copytree(ROOT / "web", cls.root / "web")
+        cls.app = Application(cls.test_config, cls.root,
                               mqtt_port=free_port(), initially_paused=True)
         cls.server = None
         try:
@@ -111,7 +114,7 @@ class RealMqttHttpIntegration(unittest.TestCase):
             self.wait_for(lambda s: s.get("run_id") != old and bool(s.get("world")),
                           "új, MQTT-n megfigyelt futás", timeout=8)
         self.__class__.used = True
-        self.wait_for(lambda s: bool(s.get("world")) and s.get("connected"),
+        self.wait_for(lambda s: s.get("ready") and s.get("connected"),
                       "MQTT-kapcsolat és kezdeti világállapot", timeout=6)
         RUNS.append({"test": self._testMethodName, "run_id": self.state()["run_id"]})
 
@@ -189,7 +192,7 @@ class RealMqttHttpIntegration(unittest.TestCase):
         return next((slot for slot in state.get("coordinator", {}).get("slots", [])
                      if slot["id"] == slot_id), {})
 
-    def test_01_nominal_three_cars_exports_and_external_repeat(self):
+    def test_01_nominal_three_cars_exports_and_authorized_repeat(self):
         started = time.monotonic()
         self.control("speed", value=4)
         self.control("resume")
@@ -239,18 +242,17 @@ class RealMqttHttpIntegration(unittest.TestCase):
             auditor.connect("127.0.0.1", self.app.mqtt_port, keepalive=10)
             auditor.loop_start()
             self.assertTrue(subscribed.wait(4), "független MQTT-feliratkozó nem indult")
-            info = auditor.publish(prefix + "requests/parking", json.dumps(request_payload), qos=1)
-            info.wait_for_publish(timeout=4)
+            self.assertTrue(self.app.vehicle_bus.publish("requests/parking", request_payload))
             reply = responses.get(timeout=4)
             self.assertEqual(reply["kind"], "parking_grant")
             self.assertEqual(reply["request_id"], request_payload["request_id"])
             self.assertEqual(reply["slot_id"], self.car(final)["slot_id"])
             reservations = self.state()["coordinator"]["reservations"]
             self.assertEqual(len(reservations), 3)
-            self.check("external_mqtt_duplicate_request_idempotent", {
+            self.check("authenticated_mqtt_duplicate_request_idempotent", {
                 "car_id": reply["car_id"], "slot_id": reply["slot_id"],
                 "reservation_id": reply["reservation_id"], "reservation_count": len(reservations)},
-                "független kliens ismételt kérésére ugyanaz a foglalás; továbbra is 3 foglalás")
+                "a hitelesített ismételt kérésre ugyanaz a foglalás; a választ független kliens figyeli")
         finally:
             auditor.disconnect()
             auditor.loop_stop()
@@ -618,6 +620,244 @@ class RealMqttHttpIntegration(unittest.TestCase):
             "controls": after["controls"], "speed_unchanged": after["speed"] == before["speed"]},
             "a reset előtt elfogadott, mögötte sorban álló régi parancsok kimaradnak az új futásban")
 
+    def test_12_local_http_boundary_and_invalid_mqtt_do_not_interrupt_controls(self):
+        port = self.server.server_port
+        attacker = f"foreign.invalid:{port}"
+        for path, data in (("/api/state", None), ("/api/export?kind=events", None),
+                           ("/api/control", {"action": "reset"})):
+            with self.assertRaises(HTTPError) as denied:
+                self.request(path, data, {"Host": attacker, "Origin": f"http://{attacker}"})
+            self.assertEqual(denied.exception.code, 403)
+        for path, marker in (("/", b'id="yard"'), ("/app.js", b"function poll"), ("/style.css", b".run-buttons")):
+            status, _, body = self.request(path)
+            self.assertEqual(status, 200)
+            self.assertIn(marker, body)
+        before = self.state()
+        with self.assertRaises(HTTPError) as denied:
+            self.request("/api/control", {"action": "pause", "extra": float("nan")})
+        self.assertEqual(denied.exception.code, 400)
+        status, _, _ = self.request("/api/control", {"action": "pause"}, {"Origin": self.base})
+        self.assertEqual(status, 202)
+        client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+        client.connect("127.0.0.1", self.app.mqtt_port)
+        client.loop_start()
+        try:
+            topic = f"mini-yard/{before['run_id']}/events"
+            bad = {"run_id": before["run_id"], "seq": [], "sim_time": 0, "type": "bad", "message": "bad"}
+            client.publish(topic, json.dumps(bad), qos=1).wait_for_publish(timeout=4)
+            self.wait_for(lambda s: s["mqtt"]["invalid"] > before["mqtt"]["invalid"], "hibás csomag eldobása")
+            self.control("resume")
+            self.wait_for(lambda s: s["sim_time"] > 0, "a vezérlőszál tovább működik")
+            _, _, raw = self.request("/api/export?kind=events")
+            self.assertFalse(any(r["payload"].get("type") == "bad" for r in json.loads(raw)))
+        finally:
+            client.disconnect()
+            client.loop_stop()
+        self.check("local_http_and_invalid_mqtt", {"foreign_host": 403, "invalid_json": 400,
+                                                  "legitimate_control": 202, "static_files": 3},
+                   "csak a helyi HTTP-cím és érvényes vezérlés fogadható el")
+
+    def test_13_dropped_reports_and_acks_recover_without_losing_parallel_results(self):
+        from unittest.mock import patch
+        vehicle_publish, service_publish = self.app.vehicle_bus.publish, self.app.service_bus.publish
+        dropped = set()
+
+        def drop_once(publish, topic, payload, qos):
+            kind = payload.get("kind") or payload.get("type")
+            if kind in ("parking_report", "parking_confirmed", "parked_spawned") and kind not in dropped:
+                dropped.add(kind)
+                return True
+            return publish(topic, payload, qos)
+
+        with patch.object(self.app.vehicle_bus, "publish", lambda t, p, qos=1: drop_once(vehicle_publish, t, p, qos)), \
+             patch.object(self.app.service_bus, "publish", lambda t, p, qos=1: drop_once(service_publish, t, p, qos)):
+            self.control("spawn_parked", slot_id="P07", request_id="parallel-a")
+            self.control("spawn_parked", slot_id="P08", request_id="parallel-b")
+            result = self.wait_for(lambda s: len(s["world"]["parked_cars"]) == 2, "két háttérművelet helyreállása")
+            for request_id in ("parallel-a", "parallel-b"):
+                self.assertEqual(result["parking_operations"][request_id]["kind"], "parked_spawned")
+            self.control("speed", value=4)
+            self.control("resume")
+            result = self.wait_for(lambda s: self.car(s).get("state") == "parked",
+                                   "elveszett végjelentés és nyugta ismétlése", timeout=22)
+            self.assertEqual(result["coordinator"]["slots"][0]["state"], "occupied")
+        self.assertEqual(dropped, {"parking_report", "parking_confirmed", "parked_spawned"})
+        self.check("single_mqtt_loss_and_parallel_setup", {"dropped_kinds": sorted(dropped), "parallel_results": 2},
+                   "három egyszeri adatvesztés után helyreáll a parkolás és két kezelői nyugta")
+
+    def test_14_parking_reconciles_after_all_fast_acknowledgements_are_lost(self):
+        from unittest.mock import patch
+        publish = self.app.service_bus.publish
+        dropped = []
+        recover = threading.Event()
+
+        def lose_ack(topic, payload, qos=1):
+            if payload.get("kind") == "parking_confirmed" and not recover.is_set():
+                dropped.append(payload["reservation_id"])
+                return True
+            return publish(topic, payload, qos)
+
+        with patch.object(self.app.service_bus, "publish", lose_ack):
+            self.control("speed", value=4)
+            self.control("resume")
+            waiting = self.wait_for(lambda s: self.car(s).get("state") == "parking_reconciling",
+                                    "tartós nyugtavesztés után egyeztetés", timeout=24)
+            self.assertGreaterEqual(len(dropped), 12)
+            self.assertEqual(waiting["world"]["metrics"]["completed"], 0)
+            self.assertEqual(waiting["coordinator"]["slots"][0]["state"], "occupied")
+            recover.set()
+            done = self.wait_for(lambda s: self.car(s).get("state") == "parked"
+                                 and self.car(s, "CAR02").get("state") == "driving",
+                                 "a foglalás egyezik és a következő jármű elindul", timeout=8)
+        self.assertEqual(set(dropped), {self.car(done)["reservation_id"]})
+        self.assertEqual(done["world"]["slots"][0]["state"], "occupied")
+        self.check("parking_recovers_after_fast_retry_budget", {"lost_acknowledgements": len(dropped),
+                                                                "following_car": "driving"},
+                   "ugyanazzal a foglalással folytatódik a flotta")
+
+    def test_15_acknowledgement_in_pause_is_recorded_without_a_model_step(self):
+        from unittest.mock import patch
+        publish = self.app.service_bus.publish
+        held = queue.Queue()
+
+        def delay_ack(topic, payload, qos=1):
+            if payload.get("kind") == "parking_confirmed":
+                held.put((topic, payload, qos))
+                return True
+            return publish(topic, payload, qos)
+
+        with patch.object(self.app.service_bus, "publish", delay_ack):
+            self.control("speed", value=4)
+            self.control("resume")
+            topic, payload, qos = held.get(timeout=24)
+            self.control("pause")
+            frozen = self.wait_for(lambda s: s.get("paused"), "modellóra befagyasztva")
+        self.assertTrue(publish(topic, payload, qos))
+        done = self.wait_for(lambda s: self.car(s).get("state") == "parked"
+                             and any(e.get("type") == "parked" for e in s["events"]),
+                             "lezárás és esemény szünetben")
+        self.assertEqual(done["sim_time"], frozen["sim_time"])
+        self.assertTrue(done["paused"])
+        _, _, raw = self.request("/api/export?kind=events")
+        self.assertEqual(sum(r["payload"].get("type") == "parked" for r in json.loads(raw)), 1)
+        self.check("paused_parking_event_is_exported", {"sim_time": done["sim_time"], "parked_events": 1},
+                   "a parkolási esemény folytatás nélkül bekerül az exportba")
+
+    def test_16_unsigned_samples_cannot_change_observed_state(self):
+        before = self.state()
+        connected = threading.Event()
+        client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+        client.on_connect = lambda *_: connected.set()
+        client.connect("127.0.0.1", self.app.mqtt_port)
+        client.loop_start()
+        try:
+            self.assertTrue(connected.wait(4))
+            sample = dict(before["world"], seq=before["world"]["seq"] + 10, sim_time=123)
+            topic = f"mini-yard/{before['run_id']}/world"
+            client.publish(topic, json.dumps(sample), qos=1).wait_for_publish(timeout=4)
+            client.publish(topic, json.dumps(dict(sample, producer="vehicle", _auth="0"*64)),
+                           qos=1).wait_for_publish(timeout=4)
+            self.wait_for(lambda s: s["mqtt"]["invalid"] >= before["mqtt"]["invalid"] + 2,
+                          "hitelesítés nélküli és hibás hitelesítésű minta elutasítása")
+            self.assertEqual(self.state()["sim_time"], 0)
+            self.control("resume")
+            self.wait_for(lambda s: 0 < s["sim_time"] < 123 and s["ready"], "az eredeti adatút folytatódik")
+        finally:
+            client.disconnect()
+            client.loop_stop()
+        self.check("unsigned_world_does_not_replace_observed_state", {"rejected_samples": 2, "ready": True},
+                   "a megfigyelt állapotot csak hitelesített üzenet frissíti")
+
+    def test_17_paused_switch_events_are_exported_and_survive_immediate_reset(self):
+        before = self.state()
+        self.assertTrue(before["paused"])
+        switches = ("pedestrian", "sensor_failure")
+        expected = []
+        for action in switches:
+            for active, suffix in ((True, "_on"), (False, "_off")):
+                expected.append(action + suffix)
+                self.control(action, active=active, run_id=before["run_id"])
+                observed = self.wait_for(lambda s: any(e["type"] == expected[-1] for e in s["events"]),
+                                         expected[-1] + " szünetben")
+                self.assertTrue(observed["paused"])
+                self.assertEqual(observed["sim_time"], before["sim_time"])
+        _, _, raw = self.request("/api/export?kind=events")
+        exported = [r["payload"] for r in json.loads(raw) if r["relative_topic"] == "events"]
+        self.assertEqual([e["type"] for e in exported], expected)
+        self.assertTrue(all(e["sim_time"] == before["sim_time"] for e in exported))
+        self.check("paused_switch_changes_reach_event_list_and_export", {"event_types": expected[:],
+                                                                        "sim_time": before["sim_time"]},
+                   "mindkét kapcsoló be- és kikapcsolása modelllépés nélkül megfigyelhető")
+
+        with self.app.lock:
+            for action in switches:
+                self.app.command({"action": action, "active": True, "run_id": before["run_id"]})
+                expected.append(action + "_on")
+            self.app.command({"action": "reset", "run_id": before["run_id"]})
+        after = self.wait_for(lambda s: s["run_id"] != before["run_id"] and s["ready"],
+                              "új futás közvetlenül a kapcsolók után", timeout=8)
+        old_path = self.root / before["log_file"]
+        records = self.app.export_records(old_path, old_path.stat().st_size)
+        old_events = [r["payload"] for r in records if r["relative_topic"] == "events"]
+        self.assertEqual([e["type"] for e in old_events], expected)
+        self.assertTrue(all(e["run_id"] == before["run_id"] for e in old_events))
+        self.assertFalse(after["events"])
+        self.assertTrue(all(not after["controls"][action] for action in switches))
+        self.check("queued_switch_events_are_retained_by_previous_run", {
+            "event_types": expected, "previous_run": before["run_id"], "next_run": after["run_id"]},
+            "a reset előtt végrehajtott kapcsolások a régi naplóba kerülnek")
+
+    def test_18_switch_accepted_before_broker_loss_is_observed_after_reconnect(self):
+        from unittest.mock import patch
+
+        before = self.state()
+        entered, release = threading.Event(), threading.Event()
+        apply_controls = self.app._apply_controls
+
+        def gated_controls():
+            entered.set()
+            if release.wait(6):
+                apply_controls()
+
+        with patch.object(self.app, "_apply_controls", gated_controls):
+            try:
+                self.assertTrue(entered.wait(2))
+                self.control("pedestrian", active=True, run_id=before["run_id"])
+                self.control("sensor_failure", active=True, run_id=before["run_id"])
+                self.app.broker.close()
+            finally:
+                release.set()
+        offline = self.wait_for(lambda s: not s["ready"] and s["controls"]["sensor_failure"],
+                                "a kapcsolók feldolgozása leállított broker mellett")
+        self.assertTrue(offline["controls"]["pedestrian"])
+        self.assertFalse(offline["events"])
+        self.app.broker = LocalBroker(self.app.mqtt_port)
+        self.app.broker.start()
+        kinds = ["pedestrian_on", "sensor_failure_on"]
+        recovered = self.wait_for(lambda s: s["ready"] and len(s["events"]) >= len(kinds),
+                                  "a két sorban maradt esemény megérkezése", timeout=10)
+        self.assertEqual(recovered["run_id"], before["run_id"])
+        self.assertTrue(recovered["paused"])
+        self.assertEqual(recovered["sim_time"], before["sim_time"])
+        self.assertEqual([event["type"] for event in recovered["events"]], kinds)
+        _, _, raw = self.request("/api/export?kind=events")
+        self.assertEqual([r["payload"]["type"] for r in json.loads(raw) if r["relative_topic"] == "events"], kinds)
+        self.check("paused_switch_events_retry_after_broker_restart", {
+            "event_types": kinds, "run_id": recovered["run_id"], "sim_time": recovered["sim_time"]},
+            "a broker visszatérése után a korábban elfogadott kapcsolások sorrendben és egyszer kerülnek az MQTT-naplóba")
+
+    def test_19_actual_broker_loss_marks_cached_state_stale_and_rejects_controls(self):
+        self.control("resume")
+        self.wait_for(lambda s: self.car(s).get("state") == "driving", "haladó autó")
+        self.app.broker.close()
+        stale = self.wait_for(lambda s: not s["ready"] and not s["mqtt"]["fresh"], "elavult MQTT-állapot")
+        self.assertFalse(stale["mqtt"]["clients"]["observer"])
+        with self.assertRaises(HTTPError) as denied:
+            self.request("/api/control", {"action": "pause"})
+        self.assertEqual(denied.exception.code, 503)
+        self.check("actual_broker_loss_disables_controls", {"observer_ready": False, "http": 503},
+                   "brokerleálláskor elavult az állapot és a vezérlés átmenetileg elérhetetlen")
+
 
 def main():
     started_utc, before = utc_now(), source_hashes()
@@ -632,10 +872,11 @@ def main():
               "finished_utc": utc_now(), "passed": successful, "tests_run": result.testsRun,
               "failures": len(result.failures), "errors": len(result.errors),
               "checks": CHECKS, "runs": RUNS, "source_unchanged_during_checks": unchanged,
+              "applied_config": RealMqttHttpIntegration.test_config,
               "source_sha256_before": before, "source_sha256_after": after,
               "evidence_directory": EVIDENCE.relative_to(ROOT).as_posix(), "raw_logs": raw_logs,
               "limitations": ["AI segítségével készített ellenőrzés; nem önálló hallgatói hozzájárulás igazolása.",
-                               "Irányított szívverés/parancs hibainjektálás; nem teljes hálózati kiesés.",
+                               "A helyi brokerleállás és az irányított szívveréskimaradás külön próba. Ipari, többgépes hálózat nem szerepel.",
                                "Nem statisztikai kampány és nem valós jármű biztonsági validálása."]}
     (ROOT / "results").mkdir(exist_ok=True)
     target = ROOT / "results" / ("verification.json" if successful else "verification-failed.json")

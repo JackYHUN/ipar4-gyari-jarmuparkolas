@@ -1,7 +1,7 @@
 """Kisméretű, determinisztikus parkolási modell, méter és másodperc egységekkel.
 
-A mozgás előírt töröttvonalon történik; az érzékelés a szimulált állapotból
-származik. A stopvonal diszkrét korlát, nem valós jármű biztonsági bizonyítéka.
+A megközelítés kijelölt úton, a beállás íven és egyenes szakaszon történik.
+Az érzékelés és a véghelyzet ellenőrzése virtuális.
 Ez a modul nem használ hálózatot: a visszaadott üzeneteket a runtime MQTT-n küldi.
 """
 from __future__ import annotations
@@ -16,6 +16,21 @@ DEFAULT_CONFIG = {
     "acceleration_mps2": 1.5, "braking_mps2": 2.0,
     "sensor_range_m": 15.0, "heartbeat_timeout_s": 1.0,
 }
+MIN_DT = 0.025
+HEARTBEAT_PERIOD = 0.2
+MIN_HEARTBEAT_TIMEOUT = 3 * HEARTBEAT_PERIOD
+PARK_RADIUS = 3.0
+PARK_SPEED = 1.2
+PARK_DWELL = 0.5
+PARK_FAST_RETRIES = 12
+PARK_RECONCILE_S = 5
+STOP_X = 25.0
+ZEBRA_X = 30.0
+ZEBRA_Y = 28.0
+ZEBRA_HALF_LENGTH = 2.1
+ZEBRA_HALF_WIDTH = 3.1
+CAR_HALF_LENGTH = 2.1
+CAR_HALF_WIDTH = 0.9
 
 _STOP_REASONS = {"pedestrian_stop": "pedestrian", "sensor_stop": "sensor_failure",
                  "communication_stop": "communication"}
@@ -29,15 +44,29 @@ def _number(value):
 
 
 def _config(config):
-    result = DEFAULT_CONFIG | dict(config or {})
+    if config is None:
+        config = {}
+    if not isinstance(config, dict):
+        raise ValueError("A konfigurációnak JSON-objektumnak kell lennie")
+    unknown = config.keys() - DEFAULT_CONFIG.keys()
+    if unknown:
+        raise ValueError(f"Ismeretlen konfigurációs mező: {', '.join(sorted(map(str, unknown)))}")
+    result = DEFAULT_CONFIG | config
     for key, upper in (("car_count", 6), ("slot_count", 8)):
         if type(result[key]) is not int or not 1 <= result[key] <= upper:
             raise ValueError(f"{key}: 1..{upper} egész érték szükséges")
-    for key in DEFAULT_CONFIG.keys() - {"car_count", "slot_count"}:
-        if not _number(result[key]) or result[key] <= 0:
-            raise ValueError(f"{key}: pozitív véges szám szükséges")
-    if result["dt"] > 0.1:
-        raise ValueError("A modell legnagyobb lépésköze 0.1 s")
+    ranges = {"dt": (MIN_DT, 0.1), "heartbeat_timeout_s": (round(MIN_HEARTBEAT_TIMEOUT, 2), 60),
+              "speed_mps": (0.1, 10), "acceleration_mps2": (0.1, 10),
+              "braking_mps2": (0.1, 10), "sensor_range_m": (0.1, 64)}
+    for key, (minimum, maximum) in ranges.items():
+        if not _number(result[key]) or not minimum <= result[key] <= maximum:
+            raise ValueError(f"{key}: {minimum} és {maximum} közötti véges szám szükséges")
+    speed, braking = result["speed_mps"], result["braking_mps2"]
+    # A stopvonal a jármű középpontjára vonatkozik. Egy lépésnyi reakciót
+    # is fenntartunk, mert az érzékelési határ két minta közé eshet.
+    if result["sensor_range_m"] < (
+            ZEBRA_X - STOP_X + speed * result["dt"] + speed * speed / (2 * braking)):
+        raise ValueError("Az érzékelőtáv nem fedezi a megállási vonalat, reakcióutat és fékutat")
     return result
 
 
@@ -49,7 +78,26 @@ def _slots(count):
 
 
 def _route(slot):
-    return [[8, 28], [56, 28], [56, 14], [slot["x"], 14], [slot["x"], 7]]
+    x = slot["x"]
+    return [[8, 28], [56, 28], [56, 14], [x + PARK_RADIUS, 14], *[
+        [x + PARK_RADIUS * (1 - math.sin(i * math.pi / 16)),
+         11 + PARK_RADIUS * math.cos(i * math.pi / 16)] for i in range(1, 8)],
+        [x, 11], [x, 7]]
+
+
+def valid_parked_pose(pose, slot):
+    if not all(_number(pose.get(key)) for key in ("x", "y", "heading", "speed")):
+        return False
+    dx, dy = pose["x"] - slot["x"], pose["y"] - slot["y"]
+    if math.hypot(dx, dy) > 0.25 or not 0 <= pose["speed"] <= 0.05:
+        return False
+    if abs((pose["heading"] + 270) % 360 - 180) > 5:
+        return False
+    angle = math.radians(pose["heading"] % 360)
+    c, s = abs(math.cos(angle)), abs(math.sin(angle))
+    # A forgatott, 4.2 × 1.8 m-es jármű befoglaló mérete a 3.8 × 4.6 m-es helyen.
+    return (abs(dx) + CAR_HALF_LENGTH * c + CAR_HALF_WIDTH * s <= 1.9
+            and abs(dy) + CAR_HALF_LENGTH * s + CAR_HALF_WIDTH * c <= 2.3)
 
 
 class _Producer:
@@ -86,6 +134,8 @@ class World(_Producer):
                       "slot_id": None, "reservation_id": None, "request_id": None,
                       "route": [], "distance_m": 0.0, "reason": "Indulásra vár.",
                       "stop_time_s": dict.fromkeys(_STOP_REASONS.values(), 0.0),
+                      "timing": {}, "_phase": "approach", "_arc_m": 0.0,
+                      "_stable_s": 0.0, "_late": False, "_reports": 0,
                       "_segment": 1, "_command_seq": 0, "_next_request": 0.0}
                      for i in range(self.config["car_count"])]
         self.pedestrian = self.sensor_failure = False
@@ -130,6 +180,18 @@ class World(_Producer):
         if self.active is None:
             return False
         car = self.cars[self.active]
+        if (topic == "commands/" + car["id"] and payload.get("kind") == "parking_confirmed"
+                and car["_phase"] == "confirm" and car["_reports"] > 0
+                and payload["seq"] > car["_command_seq"]
+                and all(payload.get(k) == car[k] for k in ("car_id", "request_id", "slot_id", "reservation_id"))):
+            slot = next(s for s in self.slots if s["id"] == car["slot_id"])
+            slot["state"] = "occupied"
+            car["timing"]["confirmed_s"] = self.sim_time
+            self._state(car, "parked", "A koordinátor nyugtázta az ellenőrzött beparkolást.")
+            self._event("parked", car, "Parkolás befejezve.", **self._parking_result(car),
+                        distance_m=round(car["distance_m"], 3), timing=car["timing"].copy())
+            self.active = None
+            return True
         if (topic != "commands/" + car["id"] or payload.get("car_id") != car["id"]
                 or payload.get("request_id") != car["request_id"]
                 or payload["seq"] <= car["_command_seq"] or car["slot_id"] is not None):
@@ -147,6 +209,7 @@ class World(_Producer):
         car.update(slot_id=slot["id"], reservation_id=payload["reservation_id"],
                    route=_route(slot), _command_seq=payload["seq"])
         slot.update(state="reserved", car_id=car["id"], reservation_id=car["reservation_id"])
+        car["timing"]["granted_s"] = self.sim_time
         self._event("parking_granted", car, "A parkolóhely foglalása megérkezett.",
                     slot_id=slot["id"], reservation_id=car["reservation_id"],
                     request_id=car["request_id"])
@@ -243,11 +306,16 @@ class World(_Producer):
         return messages
 
     def _sensor(self, car):
-        approaching = car["_segment"] == 1 and car["state"] != "waiting" and car["x"] <= 32
-        visible = approaching and 0 <= 30 - car["x"] <= self.config["sensor_range_m"]
+        # Az első útszakasz keletre tart. A zebra akkor szabadul fel, amikor
+        # a teljes jármű, a hátsó élt is beleértve, túljutott rajta.
+        rear_x = car["x"] - CAR_HALF_LENGTH
+        approaching = (car["_segment"] == 1 and car["state"] != "waiting"
+                       and rear_x <= ZEBRA_X + ZEBRA_HALF_LENGTH + 1e-9)
+        visible = approaching and ZEBRA_X - car["x"] <= self.config["sensor_range_m"]
         return {"valid": not self.sensor_failure, "range_m": self.config["sensor_range_m"],
                 "pedestrian": bool(not self.sensor_failure and self.pedestrian and visible),
-                "distance_to_stop_m": round(max(0.0, 25 - car["x"]), 3) if approaching else None}
+                "braking": car["state"] in ("pedestrian_braking", "pedestrian_stop"),
+                "distance_to_stop_m": round(max(0.0, STOP_X - car["x"]), 3) if approaching else None}
 
     def _car_view(self, car):
         return deepcopy({key: value for key, value in car.items() if not key.startswith("_")}
@@ -255,21 +323,24 @@ class World(_Producer):
 
     def snapshot(self):
         slots = deepcopy(self.slots)
+        crossing = {"active": self.pedestrian, "x": ZEBRA_X, "y": ZEBRA_Y,
+                    "half_length_m": ZEBRA_HALF_LENGTH, "half_width_m": ZEBRA_HALF_WIDTH,
+                    "stop_x": STOP_X}
         return {"run_id": self.run_id, "seq": self.seq, "sim_time": round(self.sim_time, 6),
                 "cars": [self._car_view(c) for c in self.cars], "slots": slots,
                 "parked_cars": deepcopy(self.parked_cars),
-                "crossing": {"active": self.pedestrian, "x": 30, "y": 28},
+                "crossing": crossing,
                 "metrics": {"completed": sum(c["state"] == "parked" for c in self.cars),
                             "total": len(self.cars), "preparked": len(self.parked_cars),
                             "pedestrian_stops": self.pedestrian_stops,
                             "distance_m": round(sum(c["distance_m"] for c in self.cars), 3)},
                 "map": {"width": 64, "height": 38,
                         "road": [[8, 28], [56, 28], [56, 14], [14, 14]],
-                        "slots": slots, "crossing": {"x": 30, "y": 28}}}
+                        "slots": slots, "crossing": crossing.copy()}}
 
     def _advance(self, car, distance):
-        """Ívhossz szerint mozgatás az előírt útvonalon, sarkokon át is."""
-        while distance > 1e-10 and car["_segment"] < len(car["route"]):
+        """Megközelítés az igazodási pontig."""
+        while distance > 1e-10 and car["_segment"] <= 3:
             target = car["route"][car["_segment"]]
             dx, dy = target[0] - car["x"], target[1] - car["y"]
             remaining = math.hypot(dx, dy)
@@ -285,34 +356,101 @@ class World(_Producer):
             if travel >= remaining - 1e-9:
                 car["x"], car["y"] = target
                 car["_segment"] += 1
-        if car["_segment"] >= len(car["route"]):
+
+    def _travel(self, car, dt, limit, remaining=math.inf):
+        """Trapézos lépés; a következő sebesség a maradék fékútba is belefér."""
+        v, b = car["speed"], self.config["braking_mps2"]
+        if math.isfinite(remaining):
+            available = max(0.0, remaining - v * dt / 2)
+            half = b * dt / 2
+            discriminant = 2 * b * available
+            limit = min(limit, discriminant / (math.sqrt(half * half + discriminant) + half))
+        if limit < v and v <= b * dt and limit == 0:
             car["speed"] = 0.0
-            self._state(car, "parked", "A jármű megérkezett a lefoglalt helyre.")
-            slot = next(s for s in self.slots if s["id"] == car["slot_id"])
-            slot["state"] = "occupied"
-            self._event("parked", car, "Parkolás befejezve.", slot_id=car["slot_id"],
-                        reservation_id=car["reservation_id"], request_id=car["request_id"],
-                        x=car["x"], y=car["y"], distance_m=round(car["distance_m"], 3))
-            self.active = None
+            return v * v / (2 * b)
+        car["speed"] = max(v - b * dt, min(limit, v + self.config["acceleration_mps2"] * dt))
+        return (v + car["speed"]) * dt / 2
+
+    def _parking_result(self, car):
+        return {k: car[k] for k in ("slot_id", "reservation_id", "request_id", "x", "y", "heading", "speed")} | {
+            "stable_s": round(car["_stable_s"], 6)}
 
     def _move(self, car, dt):
-        stop = (self._sensor(car)["pedestrian"] and car["_segment"] == 1)
-        remaining = max(0.0, 25 - car["x"]) if stop else math.inf
-        target = min(self.config["speed_mps"], math.sqrt(2 * self.config["braking_mps2"] * remaining))
-        old_speed = car["speed"]
-        rate = self.config["acceleration_mps2"] if target >= old_speed else self.config["braking_mps2"]
-        car["speed"] = old_speed + max(-rate * dt, min(rate * dt, target - old_speed))
-        travel = min((old_speed + car["speed"]) * dt / 2, remaining)
-        if stop and remaining <= travel + 1e-9:
-            car["speed"] = 0.0
-        self._state(car, "pedestrian_stop" if stop and car["speed"] <= 1e-9 else "driving",
-                    "Gyalogos miatt áll." if stop and car["speed"] <= 1e-9
-                    else "Fékezés a zebra előtt." if stop else "Haladás a lefoglalt parkolóhely felé.")
-        self._advance(car, travel)
+        phase = car["_phase"]
+        speed = self.config["speed_mps"]
+        if phase == "approach":
+            points = car["route"][car["_segment"]:4]
+            remaining = math.dist((car["x"], car["y"]), points[0]) + sum(
+                math.dist(a, b) for a, b in zip(points, points[1:])) if points else 0.0
+            if self._sensor(car)["pedestrian"] or (car["_late"] and self.pedestrian):
+                d = STOP_X - car["x"]
+                braking_distance = car["speed"] ** 2 / (2 * self.config["braking_mps2"])
+                if not car["_late"] and (d < -1e-7 or braking_distance > d + 1e-7):
+                    car["_late"] = True
+                    self._event("late_pedestrian", car, "Késői zebrajel: a megállási vonal már nem tartható.",
+                                x=car["x"], speed=car["speed"], braking_distance_m=braking_distance)
+                travel = self._travel(car, dt, speed, max(0.0, d))
+                if not car["_late"]:
+                    travel = min(travel, max(0.0, d))
+                self._advance(car, travel)
+                self._state(car, "pedestrian_braking" if car["speed"] > 0 else "pedestrian_stop",
+                            "Fékezés a zebra miatt." if car["speed"] > 0 else "Gyalogos miatt áll.")
+                return
+            car["_late"] = False
+            self._state(car, "driving", "Haladás a lefoglalt parkolóhely felé.")
+            self._advance(car, min(remaining, self._travel(car, dt, speed, remaining)))
+            if remaining < 1e-9:
+                car["_segment"] = 4
+            if car["_segment"] > 3 and car["speed"] <= 1e-8:
+                car["_phase"] = "align"
+                car["timing"]["maneuver_start_s"] = self.sim_time
+            return
+        target_x, target_y = car["route"][-1]
+        if phase == "align":
+            self._state(car, "aligning", "Igazodás a helyhez kis sebességű kanyarban.")
+            length = math.pi * PARK_RADIUS / 2
+            travel = min(length - car["_arc_m"], self._travel(car, dt, min(speed, PARK_SPEED)))
+            car["_arc_m"] += travel
+            angle = car["_arc_m"] / PARK_RADIUS
+            car.update(x=target_x + PARK_RADIUS * (1 - math.sin(angle)),
+                       y=11 + PARK_RADIUS * math.cos(angle),
+                       heading=180 + math.degrees(angle), distance_m=car["distance_m"] + travel)
+            if car["_arc_m"] >= length - 1e-9:
+                car.update(x=target_x, y=11.0, heading=-90.0, _phase="maneuver")
+        elif phase == "maneuver":
+            self._state(car, "maneuvering", "Lassú beállás a parkolóhelyre.")
+            remaining = max(0.0, car["y"] - target_y)
+            travel = min(remaining, self._travel(car, dt, min(speed, PARK_SPEED), remaining))
+            car.update(y=car["y"] - travel, distance_m=car["distance_m"] + travel)
+            if remaining - travel <= 1e-7 and car["speed"] <= 1e-8:
+                car["_phase"] = "verify"
+        elif phase == "verify":
+            slot = next(s for s in self.slots if s["id"] == car["slot_id"])
+            self._state(car, "parking_check", "A véghelyzet és a megállás ellenőrzése.")
+            if not valid_parked_pose(car, slot):
+                car["_stable_s"] = 0
+                self._state(car, "parking_error", "A véghelyzet nem felel meg a parkolási feltételeknek.")
+                return
+            car["_stable_s"] += dt
+            if car["_stable_s"] + 1e-9 >= PARK_DWELL:
+                car["_phase"] = "confirm"
+                car["timing"]["pose_verified_s"] = self.sim_time
+                car["_next_request"] = self.sim_time
+        elif phase == "confirm":
+            reconciling = car["_reports"] >= PARK_FAST_RETRIES
+            self._state(car, "parking_reconciling" if reconciling else "parking_pending",
+                        "A nyugta késik. A jármű áll, és újra egyezteti a foglalást." if reconciling
+                        else "A koordinátor parkolási nyugtájára vár.")
+            if self.sim_time >= car["_next_request"]:
+                self._event("parking_report", car, "Ellenőrzött parkolási véghelyzet.",
+                            **self._parking_result(car))
+                car["_next_request"] = self.sim_time + (PARK_RECONCILE_S if reconciling else 0.5)
+                if not reconciling:
+                    car["_reports"] += 1
 
     def step(self, dt, connected=True):
-        if not _number(dt) or not 0 < dt <= 0.1:
-            raise ValueError("A lépésköz 0 < dt <= 0.1 s lehet")
+        if not _number(dt) or not MIN_DT <= dt <= 0.1:
+            raise ValueError(f"A lépésköz {MIN_DT} és 0.1 s között lehet")
         self.sim_time = round(self.sim_time + dt, 9)
         if self.active is None:
             self.active = next((i for i, c in enumerate(self.cars) if c["state"] == "waiting"), None)
@@ -321,12 +459,18 @@ class World(_Producer):
                 # A várakozóhely -> sorvégi kijárat átadás külön nem modellezett,
                 # diszkrét esemény; a mért út csak a (8,28) kijárattól indul.
                 car.update(x=8.0, y=28.0, request_id=f"{self.run_id}:{car['id']}:parking")
+                car["timing"]["dispatched_s"] = self.sim_time
+                self._event("dispatched", car, "Átadás a sorból a gyártósori kijárathoz.")
         messages = []
         if self.active is not None:
             car = self.cars[self.active]
             position_before = car["x"], car["y"]
             if not connected or self.sensor_failure:
                 car["speed"] = 0.0
+                if car["_phase"] == "verify":
+                    car["_stable_s"] = 0
+                if car["slot_id"] is None:
+                    car["timing"]["start_blocked_s"] = round(car["timing"].get("start_blocked_s", 0) + dt, 9)
                 self._state(car, "communication_stop" if not connected else "sensor_stop",
                             "A felügyelt szívverés nem érkezik." if not connected else "Az érzékelő hibás.")
             elif car["slot_id"] is None:
@@ -339,7 +483,7 @@ class World(_Producer):
                 self._move(car, dt)
             # Csak a teljesen álló modelllépések számítanak; a fékezés és
             # a stopvonalhoz még elmozduló utolsó lépés nem. Egy lépés egy ok.
-            if (car["state"] in _STOP_REASONS and car["speed"] == 0
+            if (car["slot_id"] is not None and car["state"] in _STOP_REASONS and car["speed"] == 0
                     and (car["x"], car["y"]) == position_before):
                 reason = _STOP_REASONS[car["state"]]
                 car["stop_time_s"][reason] = round(car["stop_time_s"][reason] + dt, 9)
@@ -377,19 +521,20 @@ class Coordinator(_Producer):
         if not isinstance(request_id, str) or not request_id or len(request_id) > 160:
             return []
         reservation = self.reservations.get(car_id)
-        if topic == "events" and payload.get("type") == "parked":
-            if (reservation is None or reservation["state"] != "reserved"
+        if topic == "events" and payload.get("type") == "parking_report":
+            if (reservation is None
                     or payload["seq"] <= self._last_request.get(car_id, 0)
                     or any(payload.get(k) != reservation[k] for k in
                            ("request_id", "slot_id", "reservation_id"))):
                 return []
             slot = next(s for s in self.slots if s["id"] == reservation["slot_id"])
-            if not (_number(payload.get("x")) and _number(payload.get("y"))
-                    and math.hypot(payload["x"] - slot["x"], payload["y"] - slot["y"]) <= 0.25):
+            if (not valid_parked_pose(payload, slot) or not _number(payload.get("stable_s"))
+                    or payload["stable_s"] < PARK_DWELL):
                 return []
             reservation["state"] = slot["state"] = "occupied"
             self.sim_time = max(self.sim_time, payload["sim_time"])
-            return [self._emit("coordinator", self.snapshot())]
+            return [self._emit("commands/" + car_id, {
+                "kind": "parking_confirmed", **reservation}), self._emit("coordinator", self.snapshot())]
         if topic != "requests/parking":
             return []
         if reservation and reservation["request_id"] != request_id:

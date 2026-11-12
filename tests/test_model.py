@@ -3,9 +3,10 @@
 A valódi MQTT-adatutat külön integrációs ellenőrzés vizsgálja.
 """
 from copy import deepcopy
+import math
 import unittest
 
-from mini_yard.model import Coordinator, DEFAULT_CONFIG, World
+from mini_yard.model import CAR_HALF_LENGTH, ZEBRA_HALF_LENGTH, ZEBRA_X, Coordinator, DEFAULT_CONFIG, World
 
 
 class ModelTests(unittest.TestCase):
@@ -29,7 +30,8 @@ class ModelTests(unittest.TestCase):
         snap = self.world.snapshot()
         self.assertEqual(snap["metrics"]["completed"], 3)
         self.assertEqual([c["slot_id"] for c in snap["cars"]], ["P01", "P02", "P03"])
-        for car, expected in zip(snap["cars"], (111.0, 106.0, 101.0)):
+        for car, expected in zip(snap["cars"], (105.0, 100.0, 95.0)):
+            expected += 3 * math.pi / 2
             self.assertAlmostEqual(car["distance_m"], expected)
         self.assertEqual([s["state"] for s in self.coordinator.slots[:3]], ["occupied"] * 3)
 
@@ -108,13 +110,93 @@ class ModelTests(unittest.TestCase):
     def test_invalid_parked_report_cannot_occupy_slot(self):
         request = self.world.step(0.1)[0][1]
         grant = self.coordinator.handle("requests/parking", request)[0][1]
-        report = grant | {"type": "parked", "seq": 90, "sim_time": 30, "x": 14, "y": 7}
+        report = grant | {"type": "parking_report", "seq": 90, "sim_time": 45, "x": 14, "y": 7,
+                          "heading": -90, "speed": 0, "stable_s": 0.5}
         self.assertEqual(self.coordinator.handle("events", report | {"reservation_id": "wrong"}), [])
         self.assertEqual(self.coordinator.handle("events", report | {"x": 50}), [])
+        for change in ({"heading": 0}, {"speed": 3}, {"y": 7.24}, {"stable_s": 0.49}):
+            self.assertEqual(self.coordinator.handle("events", report | change), [])
         self.assertEqual(self.coordinator.slots[0]["state"], "reserved")
         self.assertTrue(self.coordinator.handle("events", report))
         self.assertEqual(self.coordinator.slots[0]["state"], "occupied")
-        self.assertEqual(self.coordinator.handle("events", report), [])
+        self.assertEqual(self.coordinator.handle("events", report)[0][1]["kind"], "parking_confirmed")
+
+    def test_bounded_zebra_braking_and_late_detection(self):
+        for late in (False, True):
+            self.world = World({"car_count": 1}, "test-run")
+            self.coordinator = Coordinator({"car_count": 1}, "test-run")
+            car = self.world.cars[0]
+            if late:
+                while car["x"] < 26:
+                    self.deliver()
+            self.world.control("pedestrian", {"active": True})
+            events = []
+            for _ in range(200):
+                previous = car["speed"]
+                events.extend(p["type"] for topic, p in self.deliver() if topic == "events")
+                self.assertLessEqual(previous - car["speed"], 0.2 + 1e-9)
+            self.assertEqual(car["state"], "pedestrian_stop")
+            self.assertEqual("late_pedestrian" in events, late)
+            self.assertEqual(car["x"] > 25, late)
+
+    def test_crossing_remains_visible_until_rear_clears_it(self):
+        end = ZEBRA_X + ZEBRA_HALF_LENGTH + CAR_HALF_LENGTH
+        for position, should_detect in ((32.00000000000005, True), (end, True), (end + 0.01, False)):
+            with self.subTest(position=position):
+                self.world = World({"car_count": 1}, "test-run")
+                self.coordinator = Coordinator({"car_count": 1}, "test-run")
+                self.tick(25)
+                car = self.world.cars[0]
+                car["x"] = position
+                self.world.control("pedestrian", {"active": True})
+                self.assertEqual(self.world.snapshot()["cars"][0]["sensor"]["pedestrian"], should_detect)
+                events = [p["type"] for t, p in self.deliver() if t == "events"]
+                self.assertEqual("late_pedestrian" in events, should_detect)
+
+    def test_verified_pose_is_acknowledged_even_if_sensor_fails_after_reporting(self):
+        for _ in range(600):
+            reports = self.world.step(0.1)
+            closing_ack = None
+            for topic, data in reports:
+                for command_topic, command in self.coordinator.handle(topic, data):
+                    if command.get("kind") == "parking_confirmed":
+                        closing_ack = command_topic, command
+                    else:
+                        self.world.handle_command(command_topic, command)
+            if closing_ack:
+                break
+        else:
+            self.fail("Hiányzik a már igazolt póz lezáró nyugtája.")
+        self.world.control("sensor_failure", {"active": True})
+        self.world.step(0.1)
+        self.assertEqual(self.world.cars[0]["state"], "sensor_stop")
+        self.assertTrue(self.world.handle_command(*closing_ack))
+        self.assertEqual(self.world.cars[0]["state"], "parked")
+        self.assertEqual(self.world.cars[0]["speed"], 0)
+
+    def test_maneuver_is_slow_and_sensor_failure_interrupts_pose_check(self):
+        car = self.world.cars[0]
+        states = set()
+        for _ in range(500):
+            before = car["heading"]
+            self.deliver()
+            states.add(car["state"])
+            if car["state"] == "aligning":
+                self.assertLessEqual(abs((car["heading"] - before + 180) % 360 - 180), 2.3)
+                self.assertLessEqual(car["speed"], 1.2)
+            if car["state"] == "parking_check":
+                break
+        self.assertTrue({"aligning", "maneuvering", "parking_check"} <= states)
+        self.world.control("sensor_failure", {"active": True})
+        self.tick(8)
+        self.assertEqual(car["state"], "sensor_stop")
+        self.assertEqual(car["_stable_s"], 0)
+        self.assertEqual(self.coordinator.slots[0]["state"], "reserved")
+        self.world.control("sensor_failure", {"active": False})
+        self.tick(4)
+        self.assertEqual(car["state"], "parking_check")
+        self.tick(5)
+        self.assertEqual(car["state"], "parked")
 
     def test_malformed_inputs_fail_closed_and_snapshot_is_detached(self):
         for payload in (None, [], {}, {"run_id": "test-run", "seq": True, "sim_time": 0},
@@ -129,7 +211,10 @@ class ModelTests(unittest.TestCase):
                 self.world.step(bad_dt)
         for config in ({"car_count": 7}, {"slot_count": 0}, {"speed_mps": 0},
                        {"speed_mps": float("inf")}, {"acceleration_mps2": float("nan")},
-                       {"braking_mps2": -1}, {"dt": 0.2}, {"heartbeat_timeout_s": False}):
+                       {"braking_mps2": -1}, {"dt": 0.2}, {"dt": 1e-12},
+                       {"heartbeat_timeout_s": False}, {"heartbeat_timeout_s": 0.1}, {"sensor_range_m": 0.01},
+                       {"braking_mps2": 1e200}, {"acceleration_mps2": 1e200}, {"speed_mps": 0.001},
+                       {"extra": float("nan")}, {"other": 1}):
             with self.assertRaises(ValueError):
                 World(config, "x")
         original = deepcopy(self.world.cars)
@@ -189,6 +274,7 @@ class ModelTests(unittest.TestCase):
         self.assertTrue(all(sum(c["stop_time_s"].values()) == 0 for c in self.world.cars))
 
     def test_stop_time_telemetry_is_detached_and_a_new_run_starts_at_zero(self):
+        self.deliver()
         self.tick(2, connected=False)
         messages = self.deliver(connected=False)
         telemetry = next(p for t, p in messages if t == "telemetry/CAR01")

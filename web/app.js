@@ -1,9 +1,10 @@
 /* Kijelző: kizárólag a szerver MQTT-megfigyelőjének fogadott mintáit rajzolja. */
 "use strict";
 const $ = (id) => document.getElementById(id);
-const labels = {waiting:"Indulásra vár",requesting:"Helyet kér",driving:"Halad",pedestrian_stop:"Gyalogos miatt áll",communication_stop:"Kapcsolatra vár",sensor_stop:"Érzékelőhiba",parked:"Leparkolt"};
+const labels = {waiting:"Indulásra vár",requesting:"Helyet kér",driving:"Halad",pedestrian_braking:"Fékez",pedestrian_stop:"Gyalogos miatt áll",communication_stop:"Kapcsolatra vár",sensor_stop:"Érzékelőhiba",aligning:"Igazodik",maneuvering:"Beparkol",parking_check:"Véghelyzetet ellenőriz",parking_pending:"Nyugtára vár",parking_reconciling:"Foglalást egyeztet",parking_error:"Parkolási hiba",parked:"Leparkolt"};
 let state = null, selectedCar = "CAR01", messageFilter = "all", lastEvents = "", controlQueue = Promise.resolve();
 let messageHistory = [], historyRun = null;
+let displayedMessages = new Map();
 const seenMessages = new Set();
 const pendingControls = new Map();
 let controlError = "", transportError = "";
@@ -13,7 +14,7 @@ const esc = (value) => String(value ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;
 const num = (v, fallback = 0) => typeof v === "number" && Number.isFinite(v) ? v : fallback;
 const fmt = (v, digits = 1) => typeof v === "number" && Number.isFinite(v) ? v.toFixed(digits) : "—";
 const set = (id, value) => { $(id).textContent = value; };
-const stateClass = (code) => code === "parked" ? "done" : code?.endsWith("stop") ? "stop" : "";
+const stateClass = (code) => code === "parked" ? "done" : code?.endsWith("stop") || code === "parking_error" ? "stop" : "";
 const badge = (code) => `<span class="state-badge ${stateClass(code)}">${esc(labels[code] || code)}</span>`;
 
 function controlKey(action) {
@@ -49,48 +50,57 @@ function syncParkingSetup() {
   $("spawn-parked").disabled = unavailable || !freeParkingSlots().some(slot => slot.id === $("parked-slot").value);
   $("remove-parked-slot").disabled = unavailable || !removableParkedCars().length;
   $("remove-parked").disabled = unavailable || !removableParkedCars().some(car => car.slot_id === $("remove-parked-slot").value);
-  $("spawn-parked").setAttribute("aria-busy", String(pendingParking?.operation === "spawn"));
-  $("remove-parked").setAttribute("aria-busy", String(pendingParking?.operation === "remove"));
+  $("spawn-parked").setAttribute("aria-busy", String(pendingParking?.operation === "spawn" && !pendingParking.retry));
+  $("remove-parked").setAttribute("aria-busy", String(pendingParking?.operation === "remove" && !pendingParking.retry));
 }
 function settleParkingSetup(next) {
   if (parkingSetupRun !== next.run_id) {
     parkingSetupRun = next.run_id;
     pendingParking = null; parkingSetupMessage = ""; parkingSetupTone = "";
   }
-  if (!pendingParking) return;
-  const ack = next.parking_setup;
-  if (ack?.run_id === pendingParking.runId && ack.request_id === pendingParking.requestId
-      && ack.slot_id === pendingParking.slotId && ack.operation === pendingParking.operation
-      && ack.placement_id === pendingParking.placementId && ack.car_id === `PARK-${pendingParking.slotId}`) {
+  if (!pendingParking || transportError) return;
+  const pending = pendingParking;
+  const operation = next.parking_operations?.[pending.requestId];
+  const ack = operation || next.parking_setup;
+  const matches = ack?.run_id === pending.runId && ack.request_id === pending.requestId
+      && ack.slot_id === pending.slotId && ack.operation === pending.operation
+      && ack.placement_id === pending.placementId && ack.car_id === `PARK-${pending.slotId}`;
+  if (matches) {
     if (ack.kind === "parking_setup_rejected") {
       parkingSetupMessage = ack.message || "A foglaltság időközben megváltozott. Ellenőrizd a parkolóhelyet.";
       parkingSetupTone = "error"; pendingParking = null;
-    } else if (pendingParking.operation === "spawn" && ack.kind === "parked_spawned") {
-      const observed = next.world?.parked_cars?.some(car => car.slot_id === ack.slot_id
+      return;
+    }
+    const spawn = pending.operation === "spawn";
+    if (ack.kind === (spawn ? "parked_spawned" : "parked_removed")) {
+      pending.acked = true;
+      const cars = next.world?.parked_cars;
+      const modelSlot = next.world?.map?.slots?.find(slot => slot.id === ack.slot_id);
+      const centralSlot = next.coordinator?.slots?.find(slot => slot.id === ack.slot_id);
+      const present = cars?.some(car => car.slot_id === ack.slot_id
         && (car.id || car.car_id) === ack.car_id && car.placement_id === ack.placement_id);
-      const occupied = next.coordinator?.slots?.some(slot => slot.id === ack.slot_id && slot.state === "occupied"
-        && slot.car_id === ack.car_id && slot.placement_id === ack.placement_id);
-      // HTTP acceptance and the acknowledgement alone do not invent an observed vehicle.
-      if (observed && occupied) {
-        parkingSetupMessage = `${ack.car_id} elhelyezve: ${ack.slot_id}. A hely foglalt.`;
-        parkingSetupTone = "success"; pendingParking = null;
-      }
-    } else if (pendingParking.operation === "remove" && ack.kind === "parked_removed") {
-      const cars = next.world?.parked_cars, slots = next.coordinator?.slots;
-      const observedAbsent = Array.isArray(cars) && !cars.some(car => car.slot_id === ack.slot_id && car.placement_id === ack.placement_id);
-      const central = Array.isArray(slots) && slots.find(slot => slot.id === ack.slot_id);
-      // A waiting arriving car may reserve the freed bay before the next UI poll.
-      const released = central && !(central.state === "occupied" && central.placement_id === ack.placement_id);
-      if (observedAbsent && released) {
-        parkingSetupMessage = `${ack.car_id} eltávolítva: ${ack.slot_id}. A foglaltság frissült.`;
-        parkingSetupTone = "success"; pendingParking = null;
+      const occupied = centralSlot?.state === "occupied" && centralSlot.placement_id === ack.placement_id;
+      const versioned = Number.isInteger(ack.world_seq);
+      const current = !versioned || next.world?.seq >= ack.world_seq && next.coordinator?.seq >= ack.seq;
+      const observed = Array.isArray(cars) && centralSlot && (spawn ? present && occupied : !present && !occupied);
+      const changedAgain = versioned && current && modelSlot && centralSlot
+        && modelSlot.state === centralSlot.state && modelSlot.placement_id === centralSlot.placement_id;
+      if (current && (observed || changedAgain)) {
+        if (!observed) {
+          parkingSetupMessage = `${ack.slot_id}: a művelet visszaigazolva. A térkép az azóta frissült foglaltságot mutatja.`;
+        } else if (spawn) {
+          parkingSetupMessage = `${ack.car_id} elhelyezve: ${ack.slot_id}. A hely foglalt.`;
+        } else {
+          parkingSetupMessage = `${ack.car_id} eltávolítva: ${ack.slot_id}. A foglaltság frissült.`;
+        }
+        parkingSetupTone = "success";
+        pendingParking = null;
+        return;
       }
     }
   }
-  if (pendingParking && Date.now() - pendingParking.started > 8000) {
-    pendingParking = null;
-    parkingSetupMessage = "A parkolóbeállítás visszaigazolása nem érkezett meg. Ellenőrizd a foglaltságot új kérés előtt.";
-    parkingSetupTone = "error";
+  if (operation?.kind === "setup_uncertain" || Date.now() - pending.started > 8000) {
+    pending.retry = true;
   }
 }
 function renderParkingSetup() {
@@ -116,12 +126,15 @@ function renderParkingSetup() {
     ? `${parkingSetupMessage} Egy kézzel elhelyezett autó eltávolításával helyet szabadíthatsz fel.` : parkingSetupMessage;
   const message = transportError ? "Nincs friss kapcsolat. A parkolóbeállításhoz friss foglaltsági adat szükséges."
     : pendingControls.has("reset") ? "Új futás indul; a parkolóelrendezés törlődik."
+    : pendingParking?.retry ? `${pendingParking.slotId}: ${pendingParking.acked ? "a nyugta megérkezett, a térkép még nem egyezik" : "nincs végleges nyugta"}. Ugyanazt a kérést megismételheted.`
+    : pendingParking?.acked ? `${pendingParking.slotId}: nyugta megérkezett, várakozás a friss foglaltságra…`
     : pendingParking ? `${pendingParking.slotId}: ${pendingParking.operation === "remove" ? "eltávolítás" : "elhelyezés"} kérése elküldve, MQTT-visszaigazolásra vár…`
     : resultMessage || (choices.length ? "Elhelyezéssel vagy eltávolítással változtathatod a már itt álló autókat. Az új futás az egész elrendezést törli."
       : state?.world?.map?.slots && state?.coordinator?.slots ? removable.length ? "Nincs szabad hely. Egy kézzel elhelyezett autó eltávolításával helyet szabadíthatsz fel."
         : "Nincs szabad hely és nincs eltávolítható kézi autó. Új futást indíthatsz." : "A parkolókezelő és a világmodell első mintájára vár.");
   if ($("parked-status").textContent !== message) set("parked-status", message);
-  $("parked-status").dataset.tone = transportError ? "error" : pendingParking ? "pending" : parkingSetupTone;
+  $("parked-status").dataset.tone = transportError || pendingParking?.retry ? "error" : pendingParking ? "pending" : parkingSetupTone;
+  if ($("retry-parking")) $("retry-parking").hidden = !pendingParking?.retry || Boolean(transportError) || pendingControls.has("reset");
   syncParkingSetup();
 }
 function spawnParked() {
@@ -134,9 +147,9 @@ function removeParked() {
   if (!car) return controlQueue;
   return parkingRequest("remove", car.slot_id, car.placement_id);
 }
-function parkingRequest(operation, slotId, placementId) {
-  if (!state || transportError || pendingParking || pendingControls.has("reset")) return controlQueue;
-  const requestId = globalThis.crypto?.randomUUID?.() || `parked-${Date.now()}-${++spawnSequence}-${Math.random().toString(16).slice(2)}`;
+function parkingRequest(operation, slotId, placementId, retryId = null) {
+  if (!state || transportError || pendingParking && !retryId || pendingControls.has("reset")) return controlQueue;
+  const requestId = retryId || globalThis.crypto?.randomUUID?.() || `parked-${Date.now()}-${++spawnSequence}-${Math.random().toString(16).slice(2)}`;
   const pending = {operation, runId:state.run_id, requestId, slotId, placementId:operation === "spawn" ? requestId : placementId, started:Date.now()};
   pendingParking = pending; parkingSetupMessage = ""; parkingSetupTone = "";
   renderParkingSetup();
@@ -148,11 +161,16 @@ function parkingRequest(operation, slotId, placementId) {
       const response = await fetch("/api/control", {method:"POST", headers:{"Content-Type":"application/json"},
         body:JSON.stringify(body), signal:AbortSignal.timeout(5000)});
       const result = await response.json();
-      if (!response.ok) throw new Error(result.error || "A parkolóbeállítás kérése nem sikerült.");
+      if (!response.ok) {
+        pending.rejected = true;
+        throw new Error(result.error || "A parkolóbeállítás kérése nem sikerült.");
+      }
       if (result.request_id !== requestId) throw new Error("A parkolóbeállítás kérésazonosítója nem egyezik a válasszal.");
     } catch (error) {
       if (pendingParking !== pending) return;
-      pendingParking = null; parkingSetupMessage = error.message; parkingSetupTone = "error";
+      if (pending.rejected) pendingParking = null;
+      else pending.retry = true;
+      parkingSetupMessage = error.message; parkingSetupTone = "error";
       renderParkingSetup();
     }
   });
@@ -206,6 +224,9 @@ $("reset").addEventListener("click", () => control("reset"));
 $("spawn-parked").addEventListener("click", spawnParked);
 $("parked-slot").addEventListener("change", syncParkingSetup);
 $("remove-parked").addEventListener("click", removeParked);
+$("retry-parking")?.addEventListener("click", () => {
+  if (pendingParking?.retry) parkingRequest(pendingParking.operation, pendingParking.slotId, pendingParking.placementId, pendingParking.requestId);
+});
 $("remove-parked-slot").addEventListener("change", syncParkingSetup);
 document.querySelectorAll("[data-speed]").forEach(button => button.addEventListener("click", () => control("speed", {value:Number(button.dataset.speed)})));
 document.querySelectorAll("[data-action]").forEach(button => button.addEventListener("click", () => control(button.dataset.action, {active:!state?.controls?.[button.dataset.action]})));
@@ -217,7 +238,7 @@ $("yard").addEventListener("keydown", event => { if (["Enter"," "].includes(even
 $("messages").addEventListener("click", event => {
   const row = event.target.closest("[data-message]");
   if (!row) return;
-  const record = messageHistory.find(r => r.payload.message_id === row.dataset.message);
+  const record = displayedMessages.get(row.dataset.message);
   if (!record) return;
   $("payload").textContent = JSON.stringify(record, null, 2);
   $("payload-details").open = true;
@@ -244,7 +265,8 @@ function updateMarkup(id, markup) {
 }
 function lifecycleStep(car) {
   if (!car) return -1;
-  if (car.state === "parked") return 2;
+  if (car.state === "parked") return 3;
+  if (car.timing?.maneuver_start_s != null) return 2;
   return car.slot_id && !["waiting", "requesting"].includes(car.state) ? 1 : 0;
 }
 function renderProgress(metrics, cars) {
@@ -271,15 +293,18 @@ function render() {
   if (playIcon) playIcon.className = `icon icon-player-${state.paused ? "play" : "pause"}`;
   document.querySelectorAll("[data-speed]").forEach(b => b.setAttribute("aria-pressed", String(Number(b.dataset.speed) === state.speed)));
   document.querySelectorAll("[data-action]").forEach(b => b.setAttribute("aria-pressed", String(Boolean(state.controls?.[b.dataset.action]))));
-  $("kpi-completed").innerHTML = `${num(metrics.completed)} <small>/ ${num(metrics.total, 3)}</small>`;
+  $("kpi-completed").innerHTML = `${num(metrics.completed)} <small>/ ${num(metrics.total, cars.length)}</small>`;
   set("kpi-progress", complete ? "Minden autó megérkezett" : active ? `${active.id} az aktív autó` : "Indulásra vár");
-  $("kpi-free").innerHTML = `${slots.filter(s => s.state === "free").length} <small>/ ${slots.length || 8}</small>`;
+  $("kpi-free").innerHTML = `${slots.filter(s => s.state === "free").length} <small>/ ${slots.length}</small>`;
   set("kpi-reserved", `${slots.filter(s => s.state === "reserved").length} lefoglalt · ${slots.filter(s => s.state === "occupied").length} parkolt`);
   set("kpi-stops", num(metrics.pedestrian_stops)); set("kpi-messages", num(state.mqtt?.received).toLocaleString("hu-HU"));
   set("kpi-heartbeat", `Szívverés: ${fmt(state.mqtt?.heartbeat_age_s, 2)} s ${state.connected ? "· rendben" : "· hiányzik"}`);
   set("broker-address", `TCP · 127.0.0.1:${state.mqtt?.port || 19085}`);
   set("log-file", state.log_file || "—");
-  set("map-status", state.paused ? "Szünet · utolsó fogadott minta" : `${10 * state.speed} minta/s · ${state.speed}×`);
+  if ($("project-subtitle")) set("project-subtitle", `${cars.length} autó · ${slots.length} parkolóhely · 1 zebra`);
+  if ($("heartbeat-limit")) set("heartbeat-limit", `${num(state.config?.heartbeat_timeout_s, 1).toLocaleString("hu-HU")} s valós idő után kommunikációs megállás.`);
+  const dt = num(state.config?.dt, 0.1);
+  set("map-status", state.paused ? "Szünet · utolsó fogadott minta" : complete ? "Befejezve · MQTT-állapot" : `${fmt(state.speed / dt, 0)} névleges minta/s · ${state.speed}×`);
   if ($("map-receipt-label")) set("map-receipt-label", state.paused ? "MQTT-n fogadott minta · a futás szünetel" : "MQTT-n fogadott világállapot");
   renderProgress(metrics, cars);
   const choices = cars.map(c => c.id).join(",");
@@ -299,7 +324,15 @@ function render() {
     lastEvents = eventKey;
     $("events").innerHTML = state.events?.length ? [...state.events].reverse().map(e => `<li><time>${fmt(e.sim_time)} s</time><div><strong>${esc(e.car_id || "RENDSZER")} · ${esc(e.type)}</strong>${esc(e.message || "Állapotváltás")}</div></li>`).join("") : '<li class="empty">Indítsd el a futást az eseményekhez.</li>';
   }
-  if (historyRun !== state.run_id) { historyRun = state.run_id; messageHistory = []; seenMessages.clear(); $("payload").textContent = "Kattints egy üzenetre a táblázatban."; }
+  const runChanged = historyRun !== state.run_id;
+  if (runChanged) {
+    historyRun = state.run_id;
+    messageHistory = [];
+    seenMessages.clear();
+    displayedMessages.clear();
+    $("payload").textContent = "Válassz egy üzenetet az új futás táblázatából.";
+    $("payload-details").open = false;
+  }
   for (const record of state.messages || []) {
     const key = record.payload?.message_id;
     if (key && !seenMessages.has(key)) { seenMessages.add(key); messageHistory.push(record); }
@@ -308,7 +341,7 @@ function render() {
   if (messageHistory.length > 600) {
     for (const record of messageHistory.splice(0, messageHistory.length - 600)) seenMessages.delete(record.payload.message_id);
   }
-  renderMessages();
+  renderMessages(runChanged);
   syncPendingControls();
   if (transportError) markStale();
 }
@@ -340,6 +373,10 @@ function carGradients(prefix = "map") {
 }
 function renderMap(world, centralSlots) {
   const cars = world.cars || [], slots = world.map?.slots || [], crossing = Boolean(world.crossing?.active);
+  const crossingX = num(world.crossing?.x, 30) * 10, crossingY = num(world.crossing?.y, 28) * 10;
+  const halfLength = num(world.crossing?.half_length_m, 2.1) * 10;
+  const halfWidth = num(world.crossing?.half_width_m, 3.1) * 10;
+  const stopX = num(world.crossing?.stop_x, 25) * 10;
   const central = new Map(centralSlots.map(slot => [slot.id, slot]));
   const selected = cars.find(car => car.id === selectedCar);
   const slotMarkup = slots.map(slot => {
@@ -411,13 +448,13 @@ function renderMap(world, centralSlots) {
     <text x="38" y="369" font-size="8" fill="#738b9a" letter-spacing="1.2">INDULÁSI SOR</text>
     <text x="340" y="193" text-anchor="middle" font-size="10" fill="#7e96a3" letter-spacing="2">GYÁRI UDVAR</text>
     <text x="340" y="208" text-anchor="middle" font-size="8" fill="#879da9">rögzített útvonal · helyi érzékelés</text>
-    <rect x="279" y="249" width="42" height="62" rx="2" fill="${crossing ? "#f4dcb5" : "#becdd6"}" stroke="${crossing ? "#be8b4e" : "#a6bac6"}"/>
-    ${Array.from({length:7},(_,i)=>`<rect x="282" y="${253+i*8}" width="36" height="4" fill="#fff"/>`).join("")}
-    <path d="M 250 254 V 306" stroke="${crossing ? "#bb7a36" : "#8ca5b5"}" stroke-width="3"/>
-    <text x="246" y="246" text-anchor="end" fill="#6c8290" font-size="7" font-weight="650">STOP</text>
-    <text x="300" y="237" text-anchor="middle" font-size="8" fill="${crossing ? "#985c22" : "#607d8c"}" font-weight="650">ZEBRA · ${crossing ? "FOGLALT" : "SZABAD"}</text>
+    <rect x="${crossingX-halfLength}" y="${crossingY-halfWidth}" width="${2*halfLength}" height="${2*halfWidth}" rx="2" fill="${crossing ? "#f4dcb5" : "#becdd6"}" stroke="${crossing ? "#be8b4e" : "#a6bac6"}"/>
+    ${Array.from({length:7},(_,i)=>`<rect x="${crossingX-halfLength+3}" y="${crossingY-halfWidth+(i+0.5)*2*halfWidth/7}" width="${2*halfLength-6}" height="4" fill="#fff"/>`).join("")}
+    <path d="M ${stopX} ${crossingY-halfWidth+5} V ${crossingY+halfWidth-5}" stroke="${crossing ? "#bb7a36" : "#8ca5b5"}" stroke-width="3"/>
+    <text x="${stopX-4}" y="${crossingY-halfWidth-3}" text-anchor="end" fill="#6c8290" font-size="7" font-weight="650">STOP</text>
+    <text x="${crossingX}" y="${crossingY-halfWidth-12}" text-anchor="middle" font-size="8" fill="${crossing ? "#985c22" : "#607d8c"}" font-weight="650">ZEBRA · ${crossing ? "FOGLALT" : "SZABAD"}</text>
     ${route}${parkedVehicles}${vehicles}
-    ${crossing ? `<g transform="translate(300 279)"><circle r="12" fill="#fff7e9" stroke="#bc853f" stroke-width="1.4"/><circle cy="-4" r="2.4" fill="#a16a2a"/><path d="M 0 -1 v 6 m 0 -4 l -4 3 m 4 -3 l 4 3 M 0 5 l -3 4 m 3 -4 l 3 4" fill="none" stroke="#a16a2a" stroke-width="1.6" stroke-linecap="round"/></g>` : ""}
+    ${crossing ? `<g transform="translate(${crossingX} ${crossingY-1})"><circle r="12" fill="#fff7e9" stroke="#bc853f" stroke-width="1.4"/><circle cy="-4" r="2.4" fill="#a16a2a"/><path d="M 0 -1 v 6 m 0 -4 l -4 3 m 4 -3 l 4 3 M 0 5 l -3 4 m 3 -4 l 3 4" fill="none" stroke="#a16a2a" stroke-width="1.6" stroke-linecap="round"/></g>` : ""}
     <path d="M 500 363 H 600 M 500 360 V 366 M 600 360 V 366" stroke="#8ca4b1" stroke-width="1"/>
     <text x="550" y="357" text-anchor="middle" fill="#6d8796" font-size="7">10 m</text>`);
 }
@@ -462,13 +499,17 @@ function renderInspector(car) {
     ${failed ? `<path d="M 141 42 l 18 18 m 0 -18 l -18 18" stroke="#bd6e67" stroke-width="2"/>` : ""}
     <text x="282" y="23" text-anchor="end" font-family="Consolas,monospace" font-size="10" fill="#6c8598">${fmt(sensor.range_m,0)} m</text>
     <text x="16" y="145" font-size="8" fill="#7f95a3">HATÓTÁV SZEMLÉLTETÉSE</text>`;
-  set("sensor-result", failed ? "Érvénytelen érzékelőminta" : !approach ? "Zebraérzékelés ezen a szakaszon nincs" : seen ? "Gyalogos észlelve" : "Nincs észlelt gyalogos");
-  set("sensor-detail", `Virtuális zebraérzékelő · ${fmt(sensor.range_m,0)} m · 10 Hz modellidőben`);
+  set("sensor-result", failed ? "Érvénytelen érzékelőminta" : !approach ? "Zebraérzékelés ezen a szakaszon nincs" : seen ? (sensor.braking ? "Gyalogos észlelve · fékezés vagy megállás" : "Gyalogos észlelve") : "Nincs észlelt gyalogos");
+  set("sensor-detail", `Virtuális zebraérzékelő · ${fmt(sensor.range_m,0)} m · ${fmt(1 / num(state.config?.dt, 0.1),0)} Hz modellidőben`);
 }
 
-function renderMessages() {
-  if ($("messages").contains(document.activeElement)) return;
+function renderMessages(runChanged = false) {
+  if ($("messages").contains(document.activeElement)) {
+    if (!runChanged) return;
+    $("message-filter").focus({preventScroll:true});
+  }
   const items = messageHistory.filter(r => messageFilter === "all" || r.relative_topic.startsWith(messageFilter)).slice(-20).reverse();
+  displayedMessages = new Map(items.map(r => [r.payload.message_id, r]));
   $("messages").innerHTML = items.map(r => `<tr data-message="${esc(r.payload.message_id)}"><td>${fmt(r.payload.sim_time)}</td><td><button aria-label="${esc(r.relative_topic)} csomag megnyitása">${esc(r.relative_topic)}</button></td><td>${num(r.qos)}</td><td>${fmt(r.latency_ms,2)}</td></tr>`).join("") || '<tr><td colspan="4">Még nincs ilyen fogadott üzenet az ablakban.</td></tr>';
 }
 
@@ -479,7 +520,9 @@ async function poll() {
     const next = await response.json();
     if (!next.run_id) throw new Error("Az alkalmazás még indul.");
     state = next;
-    transportError = next.error ? `A futás leállt: ${next.error}` : "";
+    transportError = next.error ? `A futás leállt: ${next.error}`
+      : next.ready === false || next.mqtt?.fresh === false || num(next.mqtt?.world_age_s, num(next.mqtt?.last_message_age_s)) > 2
+        ? "A HTTP elérhető, de az MQTT-adatút nem ad friss állapotot." : "";
     settleControls(next);
     settleParkingSetup(next);
     render();
@@ -498,7 +541,8 @@ async function poll() {
 }
 function markStale() {
     $("status-dot").className = "dot warning"; set("run-status", "Nincs friss adat");
-    set("map-status", "Utolsó ismert állapot · nincs friss kapcsolat");
+    const age = state?.mqtt?.world_age_s;
+    set("map-status", `Utolsó ismert állapot${Number.isFinite(age) ? ` · ${fmt(age)} s régi` : ""}`);
     if ($("map-receipt-label")) set("map-receipt-label", "Nincs friss kapcsolat · a rajz korábbi mintát mutat");
     if ($("sensor-state-tag")) set("sensor-state-tag", "Korábbi észlelés");
 }

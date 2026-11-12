@@ -24,9 +24,9 @@ rectangle "Helyi oktatási demonstrátor rendszerhatára" {
   sensor --> vehicle : virtuális érzékelés
   vehicle --> process : sebesség / megállás
   vehicle --> broker : helyigény, kézi elhelyezés / eltávolítás,\ntelemetria, esemény, világállapot
-  broker --> vehicle : helyfoglalási / foglaltságkezelési parancs
-  coordinator --> broker : kiosztás, állapot, szívverés
-  broker --> coordinator : helyigény, kézi elhelyezés / eltávolítás,\nparkolási esemény
+  broker --> vehicle : kiosztás, foglaltságkezelési válasz,\nparkolási nyugta
+  coordinator --> broker : kiosztás, nyugta, állapot, szívverés
+  broker --> coordinator : helyigény, kézi elhelyezés / eltávolítás,\nellenőrzött parkolási végjelentés
   broker --> watchdog : fogadott szívverés
   watchdog --> vehicle : kapcsolat érvényessége
   broker --> observer : világ, koordinátor, telemetria, esemény

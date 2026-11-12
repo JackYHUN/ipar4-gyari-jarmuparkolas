@@ -8,12 +8,12 @@ A terv az elvárt viselkedést rögzíti. A végrehajtás és az eredmény a tes
 | --- | --- | --- | --- |
 | K1 | Egy helyhez ne tartozzon két aktív foglalás. | Egy központi koordinátor kezeli a helyek állapotát. | Több kérés után egyedi `slot_id` értékek a foglalásokban; koordinátor-modellteszt és MQTT-napló. |
 | K2 | Ismételt kérés ne foglaljon új helyet. | Kérésazonosítóhoz tartozó foglalás újbóli felhasználása. | Azonos kérés ismétlésekor azonos foglalás, változatlan foglalásszám. |
-| K3 | Aktív gyalogosnál az autó ne lépje át a stop-vonalat. | Virtuális érzékelés, fékezés és diszkrét stop-vonal-korlát. | Zebra előtti haladás közben aktivált gyalogos; pozíció és sebesség összevetése a határral. |
+| K3 | Időben érkező gyalogosjelnél a jármű középpontja a megállási vonalon vagy előtte álljon meg. | Az érzékelőtáv fedezi a megállási vonalig tartó távolságot, egy lépésnyi reakcióutat és a fékutat. A késői jel külön eseményt kap. | Korai és késői jelzés, határon belüli lassulás, stopvonal és diagnosztikai esemény ellenőrzése. |
 | K4 | A gyalogos távozásával az autó továbbhaladhasson. | A megállási feltétel megszűnése után visszatérés haladásba. | Állapotváltás és későbbi parkolás; esemény- és telemetriaexport. |
 | K5 | Hiányzó szívverés megállási ok legyen. | Valós órás watchdog; alap küszöb 1,0 s. | Szívverés elnémítása, kor és `communication_stop` megfigyelése; valós idő szerinti ellenőrzés. |
 | K6 | Érvénytelen érzékelőadat mellett ne folytatódjon a szokásos haladás. | Virtuális érzékelőhiba és külön megállási állapot. | `sensor.valid`, állapot és sebesség ellenőrzése hibainjektáláskor és helyreállításkor. |
 | K7 | Helyhiány ne eredményezzen kettős kiosztást. | Szabad hely nélkül várakozó válasz. | Az autókénál kevesebb hely; a fennmaradó autó vár, az elfoglalt hely nem szabadul fel önmagától. |
-| K8 | A műszerfal hálózaton fogadott állapotot mutasson. | Külön MQTT-megfigyelő kliens szolgálja ki a HTTP-állapotot. | Valódi brokerrel végzett integráció, fogadási számláló és napló; az UI-adat és üzenet összevetése. |
+| K8 | A műszerfal világ- és koordinátorállapota hálózati megfigyelésből származzon. | Külön MQTT-megfigyelő kliens szolgálja ki a HTTP-állapotot. | Valódi brokerrel végzett integráció, fogadási számláló és napló; az UI-adat és üzenet összevetése. |
 | K9 | A kísérlet állapota utólag visszakereshető legyen. | Teljes fogadott MQTT JSONL-napló; CSV- és eseményexport. | Az export megnyitható, futás- és autóazonosítók, idő és állapot a várt mezőkben található. |
 | K10 | Az álló modellidő okonként visszakereshető legyen, kettős elszámolás nélkül. | Autónként összegzett `stop_time_s`; csak teljesen álló, aktív megállási lépések. | Modellteszt eltérő lépésközzel és egyidejű hibákkal; MQTT-n fogadott számláló és CSV-export összevetése. |
 | K11 | Már parkoló autó csak szabad helyre kerülhessen, és a mozgó autó ne kaphassa meg ugyanezt a helyet. | Központi MQTT-elhelyezési kérés és visszaigazolás; külön `parked_cars` lista. | Szünetben történő elhelyezés, ismételt kérés, foglalt és lefoglalt hely elutasítása; utána induló autó másik helyre kerül. |
@@ -21,6 +21,11 @@ A terv az elvárt viselkedést rögzíti. A végrehajtás és az eredmény a tes
 | K13 | Kézi háttérjármű eltávolításával új futás nélkül lehessen kapacitást adni a várakozó autónak. | Eltávolítási kérés és válasz a meglévő MQTT-menedzsmentúton; a flotta újrakéri a helyet. | Teljes kézi foglaltság mellett CAR01 vár; P03 felszabadítása után változatlan futásazonosítóval P03-ra indul. |
 | K14 | Régi elhelyezési vagy eltávolítási üzenet ne módosíthasson egy új háttérjárművet. | Elhelyezésenként egyedi `placement_id`; végrehajtott kérések ismétlése mellékhatás nélkül. | Elhelyezés → eltávolítás → új elhelyezés után régi kérés és visszaigazolás ismétlése; az új autó változatlan marad. |
 | K15 | Előző futás kezelőparancsa ne változtathassa meg az új futást. | `run_id` ellenőrzése fogadáskor és a sorba tett parancs alkalmazásakor. | Régi futásazonosító minden műveletnél elutasítva; reset előtt várakozó parancs nem szivárog át az új futásba. |
+| K16 | A manőver legyen önálló, és csak ellenőrzött helyzetből legyen nyugtázható. | Kis sebességű ív és egyenes beállás, pozíció-, irány-, kontúr- és stabilitási feltétel. | Négy hibás póz, fázis közbeni érzékelőhiba és névleges manőver. |
+| K17 | Elveszett parkolási vagy foglaltsági nyugta helyreállítható legyen. | Tizenkét gyors jelentés után ritkított egyeztetés ugyanazzal a foglalással. Kézi foglaltságnál a nyugta és a két egyező állapotminta együtt igazolja a lezárást. | Kimaradó végjelentés, tizenkét elveszett nyugta után folytatódó flotta, szünetben érkező nyugta és egymástól független kézi műveletek. |
+| K18 | Elavult adat és üzemképtelen vezérlés legyen látható. | A frissesség a klienskapcsolatok és a világ, illetve a koordinátor utolsó mintája alapján dől el. | Broker leállítása, HTTP 503 és Chromiumban elavult állapotjelzés. |
+| K19 | A kezelők keskeny nézetben és billentyűzettel is elérhetők legyenek. | Tördelődő fázissor, elnevezett térképgombok és futásváltáskor a táblaszűrőre helyezett fókusz. | Chromium 320, 390 és 1280 képponton, billentyűzetes kijelölés és kétlapos futásváltás. |
+| K20 | Az alkalmazás állapotát hiteles futásbeli adatok vezéreljék. | Témához és futáshoz kötött HMAC, szigorú adatmezők, ellenőrzött sorszám és küldési idő. | Aláírás nélküli minta nem akadályozza a későbbi érvényes világ- vagy koordinátori adat feldolgozását. |
 
 ## Ellenőrzési szintek
 
@@ -39,7 +44,7 @@ Saját virtuális környezettel futtatandó parancsok:
 
 ## A hibainjektálás pontos jelentése
 
-A kommunikációs hibamód elnémítja a szolgáltatás szívverését és eldobja a mozgó autók normál helyfoglalási parancsait. A telemetria és a kezelői parkolóbeállítás külön menedzsmentútja továbbra is halad. Ezért az így végrehajtott teszt a szívverés-felügyelet és a parancshiány kezeléséről ad bizonyítékot; nem állítható belőle teljes hálózatkieséssel szembeni viselkedés.
+A kommunikációs hibamód szünetelteti a szívverés publikálását, és a járműoldalon figyelmen kívül hagyja a normál kiosztási parancsokat. A koordinátor és a megfigyelő ettől még működik; a parancs az observer naplójában megjelenhet. A telemetria és a kezelői parkolóbeállítás külön menedzsmentútja továbbra is halad. Ezért az így végrehajtott teszt a szívverés-felügyelet és a parancshiány kezeléséről ad bizonyítékot; nem állítható belőle teljes hálózatkieséssel szembeni viselkedés.
 
 A gyalogosészlelés a szimulált környezetből képzett geometriai jel. A stop-vonal átlépésének megakadályozása a diszkrét modellben előírt korlátot is használ. Egy sikeres vizsgálat nem bizonyít valós autós fékút- vagy ütközésbiztonságot.
 
@@ -58,32 +63,14 @@ Kommunikációs és érzékelőhibánál a modell azonnal nullázza a sebessége
 | Megfelelt / nem felelt meg / nem hajtottuk végre | |
 | Korlátozás vagy eltérés | |
 
-## Még hiányzó kísérleti kiértékelés
+## Aktuális ellenőrzési eredmény
 
-A kis változathoz nincs elvégzett statisztikai kampány. A determinisztikus alapfutás többszöri megismétlése nem hoz létre több független folyamatmintát. A következő lépés egy előre megadott paramétervizsgálat és – ha statisztikai következtetést szeretnénk – értelmes bizonytalansági vagy véletlen modell, mintavételi egység és ismétlési terv kialakítása.
+A 2026. október 29-i különálló környezetben 36 egységteszt (29 modell, 4 broker, 3 méréskiértékelési teszt), 11 valódi MQTT/HTTP-integrációs eset 27 mért feltétellel és 31 felületi szerződésellenőrzés sikeres. A runtime-, teszt- és webforrásokat a `results/verification.json` azonosítja; a nyers MQTT-naplók az ott megadott evidence_directory alatt találhatók. A korábbi dátumú vizsgálatok történeti bizonyítékok, nem a mostani kód sikerigazolásai.
 
-Kapacitásvizsgálatnál külön kell közölni a befejezett és várakozó autók számát. Mivel a parkoló autók nem távoznak, az autókénál kisebb kapacitásnál nem helyes csak a sikeresen leparkolt járművek átlagából az egész rendszer teljesítményére következtetni. A kiértékelés az azonosított forrásverzió saját mérési adataira vonatkozik.
+A teljes állóidő, a kézi foglalás és felszabadítás, az ismételt kérések, a régi járműpéldány és az előző futás parancsainak kizárása is a tesztelt viselkedés része. A broker lezárásánál a háttérszál megszűnését és a listener bezárását is ellenőrzi az integráció. A JavaScript minimális DOM-tesztje külön Node.js futtatókörnyezetet igényel, és nem teljes böngészős teszt.
 
-## Végrehajtási bizonylat: 2026. október 19.
+## Kísérleti kiértékelés
 
-A megőrzött `results/integration/20261019T200424456122Z/verification.json` szerint a 20:04:24–20:04:58 UTC között végrehajtott valódi helyi MQTT/HTTP integráció öt tesztesete sikeres volt; összesen 12 mért feltételt rögzített. A sikeres teljes alapfutás megfigyelt állapotának modellideje 110,3 másodperc volt, ekkor mindhárom autó külön parkolóhelyen állt. Ez egy funkcionális integrációs futás eredménye, nem statisztikai becslés.
+A külön [mérési terv](MERESI_MODSZER.md) szüneteltetett és négyszeres sebességgel futó modell mellett vizsgálja a valódi MQTT-kezelőút válaszidejét. A sikeres kampány harminc futáspárban 720 mért műveletet tartalmaz; a statisztikai egység a futáspár. A meglévő bizonyítékot az `experiments.verify_campaign` újraszámolja. Ez statisztikai időmérés a helyi futtatási környezetben, nem fizikai autó validálása.
 
-A bizonylat tartalmazza a tényleges futásazonosítókat, a mért adatokat, valamint az ellenőrzés előtt és után változatlan forrásfájlok SHA-256 lenyomatait. A hozzá tartozó nyers naplók és futáskonfigurációk a `results/integration/20261019T200424456122Z/runs` mappában találhatók. Későbbi forrásmódosítás után ezt az eredményt történeti ellenőrzésként kell kezelni, vagy a tesztet újra kell futtatni.
-
-## Az okonkénti álló modellidő ellenőrzése
-
-A mérés bevezetésekor négy új eset 14-re növelte a modelltesztek számát. Az időmérés tesztjei eltérő lépésközt, egyszerre jelentkező hibákat, a stopvonalhoz még elmozduló lépés kizárását és az új futás nullázását is vizsgálják. A mérőszám pontos definíciója és a kumulatív CSV-értékek értelmezése a README „Hibahelyzetek és napló” részében szerepel.
-
-A mérés bevezetése utáni MQTT/HTTP-integráció megőrzött bizonylata a `results/integration/20261020T220119075637Z/verification.json`. Öt tesztesetben 15 mért feltételt rögzít: a gyalogos, az érzékelőhiba és a szívveréshiány alatti számlálónövekmény a fogadott modellidő növekményével egyezik; a gyalogos miatti idő a CSV-exportban is megjelenik. A forráslenyomatokat, tényleges időpontot és nyers naplók elérési útját a bizonylat tartalmazza. Ez funkcionális ellenőrzés, nem a még hiányzó statisztikai kampány.
-
-## Kézi parkolófoglalás: 2026. október 22.
-
-A kézi elhelyezés hét új modelltesztjével együtt 21 modellteszt sikeres. A valódi MQTT/HTTP-integráció hét tesztesete 20 megfigyelt feltételt rögzített; a végrehajtott források lenyomatai változatlanok maradtak. A bizonylat a `results/integration/20261022T154401511804Z/verification.json`, az aktuális másolat a `results/verification.json`.
-
-A felület 24 automatizált szerződésellenőrzése sikeres (`results/ui/design-v2/frontend-check.json`). A külön böngészős próba a két elhelyezett autót, a változatlan 0/3 teljesítést, a P02 helyet kapó mozgó autót, a nullázást és a 390 képpont széles mobil elrendezést ellenőrizte. Bizonyítékai a `results/ui/manual-parking` mappában találhatók. Ezek funkcionális ellenőrzések; statisztikai következtetést nem alapoznak meg.
-
-## Kapacitásfelszabadítás és hibajavítások: 2026. október 28.
-
-A kézi eltávolítással, az elhelyezési példányok azonosításával és az előző futás kezelőparancsainak kizárásával bővült a program. Az aktuális ellenőrzésben 33 egységteszt (29 modell és 4 broker), 11 valódi MQTT/HTTP-integrációs eset 27 mért feltétellel, valamint 31 felületi szerződésellenőrzés sikeres. A forráslenyomatokat és a nyers futások elérési útját az aktuális `results/verification.json` rögzíti. A közvetítő lezárása után a háttérszál megszűnését és a listener elérhetetlenségét is ellenőrzi az integráció.
-
-A böngészős próba teljes kézi foglaltság után a felszabadított P03 helyre induló CAR01-et és a kis kijelzőn is teljes szélességben elérhető kezelőgombokat vizsgálta. A részleteket a [kapacitásfelszabadítás leírása](KAPACITAS_FELSZABADITAS.md), a helyi bizonyítékokat a `results/ui/capacity-release` mappa tartalmazza. A korábbi dátumú eredmények történeti állapotokat írnak le.
+Kapacitásvizsgálatnál a befejezett és várakozó autókat külön kell közölni. Az azonos determinisztikus mozgás ismétlése önmagában nem hoz független folyamatmintát. A funkcionális teszteket és a statisztikai mérést ezért külön bizonylatok támasztják alá.

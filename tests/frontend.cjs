@@ -194,16 +194,17 @@ async function main() {
     assert(ui.lifecycleStep, "Production lifecycle helper missing");
     for (const state of ["waiting", "requesting"]) assert.equal(ui.lifecycleStep({state}), 0);
     for (const state of ["driving", "pedestrian_stop", "communication_stop", "sensor_stop"]) assert.equal(ui.lifecycleStep({state, slot_id: "P01"}), 1);
-    assert.equal(ui.lifecycleStep({state: "parked", slot_id: "P01"}), 2);
+    assert.equal(ui.lifecycleStep({state: "parking_pending", slot_id: "P01", timing:{maneuver_start_s:20}}), 2);
+    assert.equal(ui.lifecycleStep({state: "parked", slot_id: "P01"}), 3);
     assert.equal(ui.lifecycleStep({state: "communication_stop", slot_id: null}), 0);
     assert.equal(ui.lifecycleStep(null), -1);
   });
   await check("lifecycle display marks the current phase and clears previous current state", () => {
     const car = stateFixture().world.cars[0];
     ui.renderInspector(car);
-    assert.deepEqual(lifecycleSteps.map(step => step.dataset.state), ["complete", "current", "upcoming"]);
+    assert.deepEqual(lifecycleSteps.map(step => step.dataset.state), ["complete", "current", "upcoming", "upcoming"]);
     car.state = "parked"; ui.renderInspector(car);
-    assert.deepEqual(lifecycleSteps.map(step => step.dataset.state), ["complete", "complete", "current"]);
+    assert.deepEqual(lifecycleSteps.map(step => step.dataset.state), ["complete", "complete", "complete", "current"]);
     assert.equal(lifecycleSteps.filter(step => step.attributes["aria-current"] === "step").length, 1);
   });
   await check("parking progress is clamped for empty, invalid and out-of-range received counts", () => {
@@ -377,13 +378,46 @@ async function main() {
     assert.equal(elements.get("parked-status").dataset.tone, "");
     assert.equal(elements.get("parked-count").textContent, "0 helyben álló");
   });
-  await check("missing placement acknowledgement times out and does not keep the UI blocked", async () => {
+  await check("a versioned acknowledgement waits for both matching snapshots", async () => {
+    const s = stateFixture(); s.run_id = "setup-delayed-snapshots"; ui.setState(s); ui.render();
+    let request;
+    sandbox.fetch = async (_url, options) => {
+      request = JSON.parse(options.body);
+      return {ok:true,json:async () => ({request_id:request.request_id})};
+    };
+    await ui.spawnParked();
+    const ack = {...request, operation:"spawn", kind:"parked_spawned", car_id:"PARK-P01",
+      placement_id:request.request_id, seq:10, world_seq:20};
+    s.parking_operations = {[request.request_id]: ack};
+    s.world.seq = 19; s.coordinator.seq = 9;
+    ui.settleParkingSetup(s); ui.render();
+    assert.match(elements.get("parked-status").textContent, /várakozás a friss foglaltságra/);
+    s.world.seq = 20;
+    s.world.parked_cars = [{id:"PARK-P01", origin:"preparked", slot_id:"P01", placement_id:request.request_id}];
+    ui.settleParkingSetup(s); ui.render();
+    assert.equal(elements.get("parked-status").dataset.tone, "pending");
+    s.coordinator.seq = 11;
+    Object.assign(s.coordinator.slots[0], {state:"occupied", car_id:"PARK-P01", placement_id:request.request_id});
+    ui.settleParkingSetup(s); ui.render();
+    assert.match(elements.get("parked-status").textContent, /elhelyezve/);
+  });
+  await check("an unrelated acknowledgement still allows retry with the same request identifier", async () => {
     const s = stateFixture(); s.run_id = "setup-timeout"; ui.setState(s); ui.render();
-    sandbox.fetch = async (_url, options) => ({ok:true,json:async () => ({request_id:JSON.parse(options.body).request_id})});
-    await ui.spawnParked(); fixtureNow += 8100; ui.settleParkingSetup(s); ui.render();
-    assert.equal(elements.get("spawn-parked").disabled, false);
+    const requests = [];
+    sandbox.fetch = async (_url, options) => {
+      requests.push(JSON.parse(options.body));
+      return {ok:true,json:async () => ({request_id:requests.at(-1).request_id})};
+    };
+    await ui.spawnParked();
+    s.parking_setup = {run_id:s.run_id, request_id:"unrelated", kind:"parked_spawned"};
+    fixtureNow += 8100; ui.settleParkingSetup(s); ui.render();
+    assert.equal(elements.get("spawn-parked").disabled, true);
+    assert.equal(elements.get("retry-parking").hidden, false);
     assert.equal(elements.get("parked-status").dataset.tone, "error");
-    assert.match(elements.get("parked-status").textContent, /visszaigazolása nem érkezett/);
+    assert.match(elements.get("parked-status").textContent, /nincs végleges nyugta/);
+    await elements.get("retry-parking").listeners.click();
+    await Promise.resolve();
+    assert.deepEqual(requests[1], requests[0]);
   });
   await check("parked map glyphs escape received identity and skip missing coordinates", () => {
     const s = stateFixture(); s.world.parked_cars = [
@@ -488,7 +522,7 @@ async function main() {
     assert.equal(elements.get("parked-status").dataset.tone, "");
     assert.equal(elements.get("parked-count").textContent, "0 helyben álló");
   });
-  await check("full capacity explains individual removal and missing acknowledgement does not freeze management", async () => {
+  await check("full capacity explains individual removal and an uncertain result can be retried", async () => {
     const s = preparkedFixture("remove-timeout");
     s.world.map.slots[1].state = "occupied"; s.coordinator.slots[1].state = "occupied";
     ui.setState(s); ui.render();
@@ -498,7 +532,8 @@ async function main() {
     sandbox.fetch = async (_url, options) => ({ok:true,json:async () => ({request_id:JSON.parse(options.body).request_id})});
     await ui.removeParked(); fixtureNow += 8100; ui.settleParkingSetup(s); ui.render();
     assert.equal(elements.get("remove-parked").getAttribute("aria-busy"), "false");
-    assert.equal(elements.get("remove-parked").disabled, false);
+    assert.equal(elements.get("remove-parked").disabled, true);
+    assert.equal(elements.get("retry-parking").hidden, false);
     assert.equal(elements.get("parked-status").dataset.tone, "error");
     assert.equal(s.world.parked_cars.length, 1);
   });

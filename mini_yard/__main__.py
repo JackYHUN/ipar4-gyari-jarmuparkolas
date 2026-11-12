@@ -1,11 +1,11 @@
 """Indítás: python -m mini_yard --paused"""
 import argparse
-import json
 import logging
 from pathlib import Path
 
 from .runtime import Application
 from .server import make_server
+from .protocol import strict_json
 
 
 def main():
@@ -17,7 +17,13 @@ def main():
     parser.add_argument("--paused", action="store_true", help="Indulás megállított szimulációval")
     args = parser.parse_args()
     logging.basicConfig(level=logging.ERROR)
-    app = Application(json.loads(args.config.read_text(encoding="utf-8")), root, args.mqtt_port, args.paused)
+    try:
+        config = strict_json(args.config.read_text(encoding="utf-8"))
+        if not isinstance(config, dict):
+            raise ValueError("A konfigurációnak JSON-objektumnak kell lennie")
+        app = Application(config, root, args.mqtt_port, args.paused)
+    except (OSError, ValueError, RecursionError) as error:
+        parser.error(f"Hibás konfiguráció: {error}")
     server = None
     try:
         app.start()
