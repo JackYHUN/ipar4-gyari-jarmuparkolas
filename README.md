@@ -82,11 +82,11 @@ A teljes fogadott MQTT-forgalom JSONL-fájlba kerül; a felületen csak a legut�
 
 Az export a naplót darabonként olvassa. A CSV képletszerű szövegmezőit szövegként jelöli, a nyers érték a JSONL-ben kereshető vissza. Befejezett flottánál ritkított világállapot és életjel marad a rendszerben. A HTTP-kiszolgáló csak a tényleges helyi portra címzett loopback kéréseket fogadja el. Elavult MQTT-adatnál a vezérlés 503-as választ kap, a felület az utolsó ismert állapotot jelzi. A helyi broker előfizetése névtelen. A futtató a szerepkörhöz és a témához kötött üzeneteket futásonkénti HMAC-kulccsal hitelesíti, és a minták korát a hitelesített küldési idő alapján vizsgálja.
 
-A gyalogos- és érzékelőkapcsoló eseménye modelllépés nélkül is kimegy. MQTT-kieséskor az esemény sorban marad, és a megfigyelő általi naplózásig újrapróbálkozik. Ha szabályos leállításkor vagy futásváltáskor az esemény még nem érkezett meg, az előző futás naplója helyi `operator/control_event` rekordot őriz. A vezérlőkérés törzsére három másodperces határidő van, és a helyi HTTP-kiszolgáló legfeljebb 16 aktív kapcsolatot dolgoz fel egyszerre.
+A gyalogos- és érzékelőkapcsoló eseménye modelllépés nélkül is kimegy. MQTT-kieséskor az esemény sorban marad, és a megfigyelő általi naplózásig újrapróbálkozik. Ha szabályos leállításkor vagy futásváltáskor az esemény még nem érkezett meg, az előző futás naplója helyi `operator/control_event` rekordot őriz. A helyi HTTP-kiszolgáló legfeljebb 16 aktív kapcsolatot dolgoz fel. A kérésvonal és a fejléc teljes beolvasására öt másodperc jut, a vezérlőkérés törzsére további három.
 
 Nagy JSONL-naplóhoz futtatható a `python tools/log_segments.py results/<futás>/mqtt.jsonl --output results/szakaszok --max-mib 16` parancs. A lezárt sorokat eredeti sorrendben, teljes rekordokkal menti, majd visszaolvasással ellenőrzi a teljes adatsor lenyomatát.
 
-A kézi eltávolítás `parked_removed` eseményt ad a hely, a kérés és az elhelyezés azonosítójával. A kezelőfelület az egyező nyugta és a két egyező állapotminta után tekinti késznek a műveletet. A kezelőparancsok az aktuális futáshoz kötöttek; egy régi böngészőlap vagy a nullázás előtt sorba állított művelet nem módosíthatja az új futást.
+A kézi eltávolítás `parked_removed` eseményt ad a hely, a kérés és az elhelyezés azonosítójával. A kezelőfelület az egyező nyugta és a két egyező állapotminta után tekinti késznek a műveletet. Amíg a modell nem dolgozta fel a nyugtát, a HTTP API 409-es választ ad az azonos helyet érintő új kérésekre, időtúllépés után is. Az eredeti kérés ugyanazzal az azonosítóval ismételhető, a többi hely kezelhető. A kezelőparancsok az aktuális futáshoz kötöttek.
 
 A járművek `stop_time_s` mezője külön gyűjti a gyalogos (`pedestrian`), az érzékelőhiba (`sensor_failure`) és a felügyelt szívverés hiánya (`communication`) miatti álló modellidőt. A CSV-ben ezek a `stop_pedestrian_s`, `stop_sensor_failure_s` és `stop_communication_s` oszlopok. A számlálók az adott autó adott futásában összegzettek, ezért a CSV soraiban szereplő értékeket nem szabad összeadni: autó és futás szerint az utolsó mintát vagy két minta különbségét kell használni. Régi, mező nélküli napló exportálásakor az új oszlopok üresek.
 
@@ -106,13 +106,13 @@ A második parancs valódi MQTT/HTTP integrációt ellenőriz. A harmadikhoz kü
 
 Playwright és Chromium mellett a `node tests/browser.cjs` valódi böngészős próbát indít. A `MINI_YARD_PYTHON` változóban megadható a virtuális környezet Pythonja. A teszt ideiglenes mappában fut saját HTTP- és MQTT-porttal.
 
-A [mérési módszer](docs/MERESI_MODSZER.md) a kézi foglaltságkezelés MQTT-válaszidejét hasonlítja össze szüneteltetett és 4× sebességű futás mellett. A javított változat 30 alkalmazáspárjának eredménye a `results/mqtt-campaign-2026-11-12-r3/summary.json` fájlban van. A külön parkolási kampány azonos célhelyen hasonlítja össze a zavarmentes és gyalogosjel melletti modellidőt. Az átmeneti szenzorhibát és a telt parkolót külön esetként vizsgálja.
+A [mérési módszer](docs/MERESI_MODSZER.md) a kézi foglaltságkezelés MQTT-válaszidejét hasonlítja össze szüneteltetett és 4× sebességű futás mellett. A javított változat 30 alkalmazáspárjának eredménye a `results/mqtt-campaign-2026-11-12-r5/summary.json` fájlban van. A külön parkolási kampány azonos célhelyen hasonlítja össze a zavarmentes és gyalogosjel melletti modellidőt. Az átmeneti szenzorhibát és a telt parkolót külön esetként vizsgálja.
 
 Reprodukálás és a meglévő bizonyíték újraellenőrzése:
 
 ```powershell
 .\.venv\Scripts\python.exe -B -X utf8 -m experiments.latency_campaign
-.\.venv\Scripts\python.exe -B -X utf8 -m experiments.verify_campaign results/mqtt-campaign-2026-11-12-r3
+.\.venv\Scripts\python.exe -B -X utf8 -m experiments.verify_campaign results/mqtt-campaign-2026-11-12-r5
 .\.venv\Scripts\python.exe -B -X utf8 -m experiments.parking_campaign --output results/parkolas-sajat
 ```
 

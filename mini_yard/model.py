@@ -233,6 +233,8 @@ class World(_Producer):
         if existing is not None and any(existing[key] != value for key, value in identity.items()):
             raise ValueError("A kérésazonosító már másik parkolóbeállításhoz tartozik")
         if existing is None:
+            if any(item["slot_id"] == slot_id and item["kind"] is None for item in self._parking_setup.values()):
+                raise ValueError("A parkolóhely előző művelete még egyeztetésre vár.")
             if len(self._parking_setup) >= 256:
                 raise ValueError("A futás parkolóbeállítási kéréskerete betelt; indíts új futást")
             self._parking_setup[request_id] = identity | {"seq": 0, "kind": None}

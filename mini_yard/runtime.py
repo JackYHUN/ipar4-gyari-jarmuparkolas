@@ -25,6 +25,10 @@ class RuntimeUnavailable(RuntimeError):
     pass
 
 
+class ParkingSetupConflict(RuntimeError):
+    pass
+
+
 class Application:
     def __init__(self, config, root, mqtt_port=19085, initially_paused=False):
         self.config = World(config, "config-validation").config
@@ -64,6 +68,7 @@ class Application:
         with self.lock:
             self.run_id = uuid.uuid4().hex[:10]
             self._setup_controls = {}
+            self._setup_by_slot = {}
             self.state_cache = {"run_id": self.run_id, "ready": False}
         self.world = World(self.config, self.run_id)
         self.coordinator = Coordinator(self.config, self.run_id)
@@ -149,6 +154,10 @@ class Application:
                 existing = self._setup_controls.get(request_id)
                 if existing is not None and existing != identity:
                     raise ValueError("A kérésazonosító már másik parkolóbeállításhoz tartozik")
+                pending = self._setup_by_slot.get(slot_id)
+                if pending is not None and pending != request_id:
+                    raise ParkingSetupConflict("A parkolóhely előző művelete még egyeztetésre vár. "
+                                               "Ismételd meg az eredeti kérést ugyanazzal az azonosítóval.")
                 if existing is None and len(self._setup_controls) >= 256:
                     raise ValueError("A futás parkolóbeállítási kéréskerete betelt; indíts új futást")
                 queued = dict(data, request_id=request_id, placement_id=placement_id,
@@ -161,6 +170,7 @@ class Application:
                 raise RuntimeUnavailable("A vezérlési sor megtelt") from error
             if setup:
                 self._setup_controls[request_id] = identity
+                self._setup_by_slot[slot_id] = request_id
         if setup:
             return {"request_id": request_id}
         return {}
@@ -263,10 +273,14 @@ class Application:
             # hiba csak a jármű életjelét és normál mozgási engedélyeit ejti el.
             if topic == "commands/parking_setup":
                 if self.world.handle_command(topic, payload):
-                    if self.setup_current and self.setup_current["data"]["request_id"] == payload["request_id"]:
+                    request_id, slot_id = payload["request_id"], payload["slot_id"]
+                    if self.setup_current and self.setup_current["data"]["request_id"] == request_id:
                         self.setup_current = None
                     self._publish_world_changes()
-                    self.setup_results[payload["request_id"]] = dict(payload, world_seq=self.world.seq)
+                    self.setup_results[request_id] = dict(payload, world_seq=self.world.seq)
+                    with self.lock:
+                        if self._setup_by_slot.get(slot_id) == request_id:
+                            del self._setup_by_slot[slot_id]
                 continue
             if not self.flags["link_failure"]:
                 if topic == "service/heartbeat":

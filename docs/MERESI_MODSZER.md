@@ -123,7 +123,27 @@ egyezését a nyers MQTT-naplókkal, majd újraszámítja a páros becslést és
 bootstrap-intervallumot. Ez a mérési nyugta belső konzisztenciájának ellenőrzése,
 nem független külső tanúsítás.
 
-## A november 12-i kiadás mérése
+## A helyenkénti egyeztetést tartalmazó kiadás mérése
+
+A `results/mqtt-campaign-2026-11-12-r5` kampány 30 alkalmazáspárt, 720 mért
+és 120 bemelegítő műveletet tartalmaz. Az összesített medián szünetben
+65,06 ms, négyszeres futásnál 133,85 ms. A páronkénti blokkmediánok
+átlagos különbsége 77,93 ms, a páros percentilis bootstrap 95%-os
+intervalluma 69,16–88,22 ms. A megfigyelt maximum 363,75 ms.
+Az offline ellenőrzés igazolta a 183 fájllenyomatot, a 840 művelet nyers
+rekordjait, a kiadás forráslenyomatait és a statisztika reprodukálhatóságát.
+
+## A teljes HTTP-fejléc-határidőt tartalmazó korábbi kiadás mérése
+
+A `results/mqtt-campaign-2026-11-12-r4` kampány a kiadás forrásával futott.
+A 30 alkalmazáspár 720 mért és 120 bemelegítő műveletet tartalmaz. Az
+összesített medián szünetben 64,49 ms, négyszeres futásnál 129,66 ms.
+A páronkénti blokkmediánok átlagos különbsége 66,12 ms, a páros percentilis
+bootstrap 95%-os intervalluma 62,66–69,91 ms. A megfigyelt maximum 241,98 ms.
+Az offline ellenőrzés mind a 183 fájllenyomatot, a 840 művelet nyers rekordjait,
+az aktuális forráslenyomatokat és a statisztika egyezését ellenőrizte.
+
+## A november 12-i korábbi kiadás mérése
 
 A `results/mqtt-campaign-2026-11-12-r3` kampány a kapcsolóesemények
 újrapróbálását és a HTTP-korlátokat tartalmazó forrásverzión futott. A 30

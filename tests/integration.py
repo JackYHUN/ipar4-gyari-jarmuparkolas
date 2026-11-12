@@ -846,7 +846,80 @@ class RealMqttHttpIntegration(unittest.TestCase):
             "event_types": kinds, "run_id": recovered["run_id"], "sim_time": recovered["sim_time"]},
             "a broker visszatérése után a korábban elfogadott kapcsolások sorrendben és egyszer kerülnek az MQTT-naplóba")
 
-    def test_19_actual_broker_loss_marks_cached_state_stale_and_rejects_controls(self):
+    def test_19_request_headers_have_a_total_read_deadline(self):
+        from unittest.mock import patch
+
+        address = ("127.0.0.1", self.server.server_port)
+        host = f"Host: {address[0]}:{address[1]}\r\n".encode("ascii")
+        before = self.state()
+        with patch("mini_yard.server.HTTP_HEADER_TIMEOUT_S", 0.5):
+            for prefix in (b"GET /api/state", b"GET /api/state HTTP/1.1\r\n" + host):
+                with self.subTest(prefix=prefix), socket.create_connection(address, timeout=2) as connection:
+                    connection.sendall(prefix)
+                    time.sleep(0.25)
+                    connection.sendall(b" ")
+                    connection.settimeout(0.4)
+                    self.assertEqual(connection.recv(1), b"")
+
+        body = json.dumps({"action": "pedestrian", "active": True, "run_id": before["run_id"]}).encode()
+        request = (b"POST /api/control HTTP/1.1\r\n" + host + b"Content-Type: application/json\r\n"
+                   + f"Content-Length: {len(body)}\r\n\r\n".encode("ascii") + body)
+        with socket.create_connection(address, timeout=2) as connection:
+            connection.sendall(request)
+            with connection.makefile("rb") as response:
+                self.assertIn(b" 202 ", response.readline())
+        self.wait_for(lambda state: state["controls"]["pedestrian"], "teljes fejlécű vezérlőkérés feldolgozása")
+        self.check("http_header_deadline_and_buffered_control_body", {"incomplete_requests_closed": 2, "post_status": 202},
+                   "a kérésvonal és a fejlécek közös határidőt kapnak, az előre beolvasott törzs feldolgozható")
+
+    def test_20_uncertain_placement_blocks_removal_until_reconciled(self):
+        from unittest.mock import patch
+
+        publish = self.app.service_bus.publish
+        dropped = []
+        request_id = "uncertain-placement"
+
+        def drop_placement_ack(topic, payload, qos=1):
+            if topic == "commands/parking_setup" and payload["request_id"] == request_id:
+                dropped.append(payload["seq"])
+                return True
+            return publish(topic, payload, qos)
+
+        remove = {"action": "remove_parked", "slot_id": "P01", "request_id": "remove-after-retry",
+                  "placement_id": request_id}
+        with patch.object(self.app.service_bus, "publish", drop_placement_ack):
+            self.control("spawn_parked", slot_id="P01", request_id=request_id)
+            uncertain = self.wait_for(lambda s: s["parking_operations"].get(request_id, {}).get("kind")
+                                      == "setup_uncertain", "az elhelyezés gyors próbái elfogytak", timeout=10)
+            self.assertEqual(len(dropped), 12)
+            self.assertEqual(self.slot(uncertain, "P01")["placement_id"], request_id)
+            self.assertEqual(uncertain["world"]["parked_cars"], [])
+            with self.assertRaises(HTTPError) as blocked:
+                self.request("/api/control", remove)
+            self.assertEqual(blocked.exception.code, 409)
+            self.assertEqual(self.spawn("P02", "independent")["parking_setup"]["kind"], "parked_spawned")
+            self.assertNotIn(remove["request_id"], self.state()["parking_operations"])
+
+        self.spawn("P01", request_id)
+        self.wait_for(lambda s: s["parking_operations"][request_id]["kind"] == "parked_spawned",
+                      "az eredeti elhelyezés nyugtáját a világmodell feldolgozta")
+        self.remove_parked("P01", request_id, remove["request_id"])
+        self.wait_for(lambda s: self.slot(s, "P01")["state"] == "free"
+                      and s["world"]["slots"][0]["state"] == "free", "mindkét oldal felszabadította a helyet")
+        self.spawn("P01", request_id)
+        self.wait_for(lambda s: all(car["slot_id"] != "P01" for car in s["world"]["parked_cars"]),
+                      "régi sikeres válasz nem hozza vissza az eltávolított autót")
+        self.control("speed", value=4)
+        self.control("resume")
+        parked = self.wait_for(lambda s: self.car(s).get("state") == "parked",
+                               "az érkező autó beparkolt", timeout=25)
+        self.assertEqual(self.car(parked)["slot_id"], "P01")
+        self.check("uncertain_manual_operation_blocks_only_the_conflicting_slot", {
+            "dropped_acks": len(dropped), "conflict_status": 409, "independent_slot": "P02",
+            "parked_slot": self.car(parked)["slot_id"]},
+            "egyeztetésig a P01 módosítása blokkolt, majd a következő autó ugyanoda sikeresen beparkol")
+
+    def test_21_actual_broker_loss_marks_cached_state_stale_and_rejects_controls(self):
         self.control("resume")
         self.wait_for(lambda s: self.car(s).get("state") == "driving", "haladó autó")
         self.app.broker.close()

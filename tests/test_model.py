@@ -481,6 +481,22 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(ack["operation"], "remove")
         self.assertEqual(self.coordinator.slots[0]["placement_id"], "replacement")
 
+    def test_unconfirmed_placement_blocks_other_requests_for_same_slot(self):
+        topic, request = self.world.request_parked_car("P01", "unconfirmed")
+        _, lost_ack = self.coordinator.handle(topic, request)[0]
+        self.assertEqual(lost_ack["kind"], "parked_spawned")
+        self.assertEqual(self.world.parked_cars, [])
+        with self.assertRaisesRegex(ValueError, "egyeztetésre vár"):
+            self.world.request_parked_removal("P01", "remove-unconfirmed", "unconfirmed")
+        with self.assertRaisesRegex(ValueError, "egyeztetésre vár"):
+            self.world.request_parked_car("P01", "replacement")
+        self.place_parked("P02", "independent")
+        self.place_parked("P01", "unconfirmed")
+        self.remove_parked("P01", "remove-unconfirmed", "unconfirmed")
+        self.assertFalse(self.world.handle_command("commands/parking_setup", lost_ack))
+        self.assertEqual(self.world.slots[0]["state"], "free")
+        self.assertEqual(self.coordinator.slots[0]["state"], "free")
+
     def test_removal_ack_requires_current_run_request_operation_and_placement(self):
         self.place_parked()
         request = self.world.request_parked_removal("P01", "remove-valid", "setup-one")[1]

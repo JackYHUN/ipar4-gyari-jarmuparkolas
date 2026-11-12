@@ -9,12 +9,33 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
 from .protocol import strict_json
-from .runtime import RuntimeUnavailable
+from .runtime import ParkingSetupConflict, RuntimeUnavailable
 
 
 HTTP_CONNECTION_LIMIT = 16
 HTTP_IO_TIMEOUT_S = 5
+HTTP_HEADER_TIMEOUT_S = 5
 HTTP_BODY_TIMEOUT_S = 3
+
+
+class _RequestInput(io.RawIOBase):
+    """Keep a single read buffer while bounding the request line and headers."""
+
+    def __init__(self, connection):
+        super().__init__()
+        self.connection = connection
+        self.header_deadline = None
+
+    def readable(self):
+        return True
+
+    def readinto(self, buffer):
+        if self.header_deadline is not None:
+            remaining = self.header_deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("HTTP request header deadline expired")
+            self.connection.settimeout(remaining)
+        return self.connection.recv_into(buffer)
 
 
 class _LocalHTTPServer(ThreadingHTTPServer):
@@ -48,12 +69,26 @@ class _LocalHTTPServer(ThreadingHTTPServer):
 def make_server(app, port):
     class Handler(BaseHTTPRequestHandler):
         timeout = HTTP_IO_TIMEOUT_S
+        rbufsize = 0
+
+        def setup(self):
+            super().setup()
+            self.rfile.close()
+            self.request_input = _RequestInput(self.connection)
+            self.rfile = io.BufferedReader(self.request_input)
+
+        def handle_one_request(self):
+            self.request_input.header_deadline = time.monotonic() + HTTP_HEADER_TIMEOUT_S
+            super().handle_one_request()
 
         def log_message(self, *args):
             pass
 
         def parse_request(self):
-            if not super().parse_request():
+            parsed = super().parse_request()
+            self.request_input.header_deadline = None
+            self.connection.settimeout(self.timeout)
+            if not parsed:
                 return False
             host = self.headers.get_all("Host", [])
             port = self.server.server_port
@@ -177,6 +212,8 @@ def make_server(app, port):
                 self.send(202, json.dumps({"ok": True, "queued": True, **(result or {})}))
             except RuntimeUnavailable as error:
                 self.send(503, json.dumps({"error": str(error)}, ensure_ascii=False))
+            except ParkingSetupConflict as error:
+                self.send(409, json.dumps({"error": str(error)}, ensure_ascii=False))
             except TimeoutError:
                 self.close_connection = True
                 self.send(408, '{"error":"Kéréstörzs olvasási időtúllépés"}')
