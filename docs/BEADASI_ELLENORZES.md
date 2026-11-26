@@ -52,4 +52,20 @@ A beadási ZIP forras/ mappája a teljes programot, a forras/results/ mappa a ko
 
 Windows alatt a README telepítési parancsai után szüneteltetve indítható a műszerfal; a teljes böngészős teszthez npm ci és npx playwright install chromium szükséges. A teszteket egyenként, nem más intenzív feladattal párhuzamosan célszerű futtatni. A 4× gyorsítás névleges modellidő-szorzó, nem garantált ütemezési határidő. Elavult adat esetén a vezérlés letiltása helyes védelmi reakció, de egy el nem végzett névleges parkolási próba nem számíthat sikeresnek.
 
-A tényleges, aktuális futási eredmények és esetleges eltérések a beadási csomag külön ellenőrzési naplójában szerepelnek. 
+A tényleges, aktuális futási eredmények és esetleges eltérések a beadási csomag külön ellenőrzési naplójában szerepelnek.
+
+## A témaajánló konkrét elvárásainak megfeleltetése
+
+| Oktatói elvárás | Megvalósítás és ellenőrzés |
+|---|---|
+| A. Mérnöki rendszerfeladat | A jelentés 1–5. fejezete: rendszerhatár, feltételezések, a négy CPS-szerep, geometriai modell, állapotgép és hibakezelés. |
+| B. Működő publish/subscribe adatút | A szimulált fizikai folyamat, a publikáló, az MQTT-broker, a feliratkozók és a megfigyelő feldolgozása együtt fut; a műszerfal állapotát valós MQTT/HTTP-integrációs próbák ellenőrzik. |
+| Adat eredete és bizonytalansága | A jelentés 2–3. és 8–9. fejezete: jeljelentés, egységek, modell-lépésköz, frissítés, mérési végpontok és bootstrap-intervallumok. |
+| Kiindulási érték és mutató | A 8. fejezet zavarmentes próbái adják a gyalogos- és érzékelőhibás esetek viszonyítási alapját; a 9. fejezet külön a szüneteltetett és futó állapotot hasonlítja össze. A tervfájlok a kampány előtt rögzítik a feltételeket; az eredeti fejlesztés előtti tervezés időpontját ez önmagában nem igazolja. |
+| Reprodukálhatóság | A jelentés 10. fejezete, README, konfiguráció, rögzített függőségek, nyers adatok és ellenőrző parancsok. |
+
+**Időzítési facet (követelmény – megvalósítás – bizonyíték).** Időben aktív gyalogosjelzéskor a járműnek a kijelölt megállási vonal előtt vagy azon meg kell állnia. A vezérlő az érzékelési távolságot, a sebességet és a lassulási korlátot veszi figyelembe. A jelentés 3. fejezetében a névleges fékút 2,25 m, az egy modelllépéshez tartozó reakcióút 0,3 m, a szükséges és a konfigurált érzékelési távolság 7,55 m, illetve 15 m. A K3–K4 tesztek a korai és késői jelzést, megállást és újraindulást is vizsgálják. A feltétel kizárólag a meghatározott modellre érvényes; késői jelzéskor a vonal betartása nem garantált.
+
+**Mérnöki érték.** A foglalási azonosítók és a napló összekapcsolják a gyártósori átadást a parkolóhely kiosztásával és a parkolás nyugtázásával. Így visszakereshető, hogy egy jármű mikor és miért várakozott, illetve melyik helyre került. A párosított modellpróbákban a gyalogosjel átlagosan 6,08 modellmásodperc többletet eredményezett; az okonkénti állásidő és a fázisidők segítik a folyamat elemzését. Ezek helyi modellből származó mérnöki mutatók, nem igazolt üzemi költség- vagy időmegtakarítások.
+
+A november 27-i kicsomagolt kiadás újraellenőrzésében a 21 MQTT/HTTP-integrációs próba (38 feltétel) és a Chromium-próba sikeres volt. Mind a 31 archivált modellpróba újra előállítható és az eredeti összesítéssel egyezett. A videó és a hozzá tartozó bizonyítékok fájllenyomatai szintén egyeztek. A jelentés és a mérési adatok változatlanok. A személyes hallgatói munka és az AI-segítség tantárgyi elfogadhatósága ettől független kérdés.
