@@ -92,7 +92,7 @@ A járművek `stop_time_s` mezője külön gyűjti a gyalogos (`pedestrian`), az
 
 Csak az aktív autó teljesen álló modelllépése számít bele; a fékezés, a sorban állás, a helyigénylés és a parkolás utáni idő nem. A zebra miatti megállást elérő, még elmozduló lépés kimarad, így megállásonként legfeljebb egy lépésnyi részidő hiányozhat. Szüneteltetéskor nem fut modelllépés, új futásban a számlálók nulláról indulnak. Egyidejű okoknál a meglévő megállási prioritás érvényes: szívveréshiány, érzékelőhiba, gyalogos; egy lépés nem számolódik kétszer. Ezek modellmásodpercek, nem a számítógép előtt eltelt valós idő.
 
-## Ellenőrzés és védés
+## Ellenőrzés és bemutatás
 
 Saját virtuális környezettel:
 
@@ -106,7 +106,7 @@ A második parancs valódi MQTT/HTTP integrációt ellenőriz. A harmadikhoz kü
 
 A valódi böngészős próba rögzített Playwright-verzióval futtatható: Node.js 22 vagy 24, majd a projekt gyökerében npm ci és npx playwright install chromium. A `node tests/browser.cjs` valódi böngészős próbát indít. A `MINI_YARD_PYTHON` változóban megadható a virtuális környezet Pythonja. A teszt ideiglenes mappában fut saját HTTP- és MQTT-porttal.
 
-A [mérési módszer](docs/MERESI_MODSZER.md) a kézi foglaltságkezelés MQTT-válaszidejét hasonlítja össze szüneteltetett és 4× sebességű futás mellett. A javított mérőprogram 30 alkalmazáspárjának, 120 elemzett műveletének eredménye a `results/mqtt-campaign-2026-11-26-r8/summary.json` fájlban van. A régebbi 720 művelet külön, történeti kampány. Az új feltételek rövidebb blokkokat és 20 ms-os kért lekérdezési szünetet tartalmaznak. A külön parkolási kampány azonos célhelyen hasonlítja össze a zavarmentes és gyalogosjel melletti modellidőt. Az átmeneti szenzorhibát és a telt parkolót külön esetként vizsgálja.
+A [mérési módszer](docs/MERESI_MODSZER.md) a kézi foglaltságkezelés MQTT-válaszidejét hasonlítja össze szüneteltetett és 4× sebességű futás mellett. A javított mérőprogram 30 alkalmazáspárjának, 120 elemzett műveletének eredménye a `results/mqtt-campaign-2026-11-26-r8/summary.json` fájlban van. A régebbi 720 művelet külön, történeti kampány. A hat páros, 24 mért műveletből álló ismétlő vizsgálatot a [kiegészítő mérési melléklet](docs/KIEGESZITO_MERES.md) ismerteti. Az új feltételek rövidebb blokkokat és 20 ms-os kért lekérdezési szünetet tartalmaznak. A külön parkolási kampány azonos célhelyen hasonlítja össze a zavarmentes és gyalogosjel melletti modellidőt. Az átmeneti szenzorhibát és a telt parkolót külön esetként vizsgálja.
 
 Reprodukálás és a meglévő bizonyíték újraellenőrzése:
 
@@ -116,8 +116,14 @@ Reprodukálás és a meglévő bizonyíték újraellenőrzése:
 .\.venv\Scripts\python.exe -B -X utf8 -m experiments.parking_campaign --output results/parkolas-sajat
 ```
 
-Az új kampány saját könyvtárat és bizonylatot hoz létre. Korábbi forrásverzióhoz tartozó MQTT-kampánynál a `--historical` kapcsoló engedi a mért adatok újraellenőrzését, és jelzi a forráseltérést. Friss Git-klónból az előző, archivált kampány ellenőrzéséhez előbb a beadási ZIP forras/results könyvtárából kell átmásolni a teljes kampánymappát. Enélkül új kampány futtatható, a régi mérés nem ellenőrizhető. A [videó útmutatója](tools/VIDEO_UTMUTATO.md) a valódi MQTT-állapotokból készülő grafikus bemutató újragenerálását is leírja.
+Az új kampány saját könyvtárat és bizonylatot hoz létre. Korábbi forrásverzióhoz tartozó MQTT-kampánynál a `--historical` kapcsoló engedi a mért adatok újraellenőrzését, és jelzi a forráseltérést. Friss Git-klónból a már rögzített kampányok ellenőrzéséhez előbb a beadási ZIP forras/results könyvtárából kell átmásolni a teljes kampánymappát. Enélkül új kampány futtatható, a régi mérés nem ellenőrizhető. A [videó útmutatója](tools/VIDEO_UTMUTATO.md) a valódi MQTT-állapotokból készülő grafikus bemutató újragenerálását is leírja.
 
 A kézi parkolófoglalás használata és a 2026. október 22-i ellenőrzés bizonyítékai a [fejlesztési jegyzetben](docs/KEZI_PARKOLOFOGLALAS.md) találhatók.
 
 A `results/` könyvtár futásnaplói, tesztbizonylatai és képernyőképei helyben keletkeznek, nem részei a követett forráscsomagnak. A dokumentáció ezek relatív kimeneti helyeit és korábbi ellenőrzések azonosítóit is tartalmazza; saját futtatáskor új bizonylat készül.
+
+## Legutóbbi igazolt ellenőrzés
+
+A [dc92781 forrásverzió](https://github.com/JackYHUN/ipar4-gyari-jarmuparkolas/commit/dc92781dd85050128fa122c267ab2c4c29c6fcf6) helyi ellenőrzésében 48 Python-teszt sikerült. A hozzá tartozó [GitHub Actions futás](https://github.com/JackYHUN/ipar4-gyari-jarmuparkolas/actions/runs/45906671291) sikeres. A mérési verifikátor a teljes forráslenyomat-jegyzéket, a nyers kérés/nyugta rekordokat és a két megfigyelt végponti állapotot is ellenőrzi. Az eredeti három kampány 1128 művelete (a bemelegítéssel együtt) megfelelt. A hiányos forrásjegyzéket és a hiányzó koordinátormintákat újraszámolt fájllenyomatok mellett is elutasította. Ez nem kriptográfiai eredetigazolás; a forrás, a napló és az újraszámított eredmények egyezését ellenőrzi.
+
+A mérési adatok és a kézirat a helyi beadási csomagban találhatók; a nyilvános repository a programot és a műszaki dokumentációt tartalmazza. A jelen kiadás dokumentációs pontosítása nem módosítja a futtatható demonstrátort vagy a mérőprogramot.
