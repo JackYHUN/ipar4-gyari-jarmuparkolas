@@ -1,5 +1,6 @@
 """MQTT-kampány: fájllenyomatok, rekordazonosság, időrend és statisztika."""
 import argparse
+from bisect import bisect_right
 from collections import defaultdict
 from datetime import datetime
 import json
@@ -8,7 +9,7 @@ from pathlib import Path
 import random
 import re
 
-from .latency_campaign import ROOT, describe_conditions, digest, paired_summary
+from .latency_campaign import ROOT, consistent, describe_conditions, digest, paired_summary
 
 
 def require(condition, message):
@@ -42,6 +43,42 @@ def compare(actual, expected, field):
                 f"Nem reprodukálható mező: {field}")
 
 
+# The schema-1 measurement producer hashes exactly these source files.
+REQUIRED_SOURCE_FILES = frozenset({
+    "config.json", "requirements-lock.txt", "experiments/latency_campaign.py",
+    "mini_yard/__init__.py", "mini_yard/__main__.py", "mini_yard/broker.py",
+    "mini_yard/model.py", "mini_yard/mqtt_bus.py", "mini_yard/protocol.py",
+    "mini_yard/runtime.py", "mini_yard/server.py",
+})
+
+
+def validate_source_manifest(source):
+    require(isinstance(source, dict) and set(source) == REQUIRED_SOURCE_FILES
+            and all(isinstance(h, str) and re.fullmatch(r"[0-9a-f]{64}", h)
+                    for h in source.values()), "Hiányos vagy hibás forráslenyomat-jegyzék")
+
+
+def snapshot_series(records):
+    series = {"world": [], "coordinator": []}
+    for record in records:
+        topic = record["relative_topic"]
+        if topic in series:
+            p = record["payload"]
+            series[topic].append((p["sent_ns"] + record["latency_ms"] * 1e6, p))
+    for topic, values in series.items():
+        values.sort(key=lambda x: x[0])
+        series[topic] = ([x[0] for x in values], [x[1] for x in values])
+    return series
+
+
+def endpoint_matches(series, row):
+    state = {"parking_setup": row["mqtt_ack_record"]["payload"]}
+    for topic, (times, payloads) in series.items():
+        index = bisect_right(times, row["first_successful_poll_perf_counter_ns"] + 1) - 1
+        state[topic] = payloads[index] if index >= 0 else {}
+    return consistent(state, row["request_id"], row["placement_id"], row["operation"])
+
+
 def verify(directory, historical=False):
     directory = Path(directory).resolve()
     files = read(directory / "manifest.json")["files_sha256"]
@@ -55,6 +92,7 @@ def verify(directory, historical=False):
     require(plan["schema"] == 1 and plan["status"] == "predefined" and summary["status"] == "completed"
             and summary["plan_sha256"] == digest(directory / "plan.json")
             and summary["source_sha256"] == plan["source_sha256"], "Terv és eredmény nem tartozik össze")
+    validate_source_manifest(plan["source_sha256"])
     mismatches = []
     for name, expected in plan["source_sha256"].items():
         path = (ROOT / name).resolve()
@@ -99,7 +137,9 @@ def verify(directory, historical=False):
                 f"Hibás időrend: {run_id}")
         previous_utc = finished
         evidence = defaultdict(list)
-        for record in read_rows(directory / base / "mqtt.jsonl"):
+        raw_records = list(read_rows(directory / base / "mqtt.jsonl"))
+        series = snapshot_series(raw_records)
+        for record in raw_records:
             if record["relative_topic"] in ("requests/parking_setup", "commands/parking_setup"):
                 evidence[record["payload"]["message_id"]].append(record)
         size = (cycles + 1) * 2
@@ -111,6 +151,10 @@ def verify(directory, historical=False):
         for offset, row in enumerate(sample):
             cycle, removal = divmod(offset, 2)
             operation = "remove" if removal else "spawn"
+            placement = f"campaign-{pair:02d}-{condition}-{cycle:02d}"
+            require(row["placement_id"] == placement
+                    and row["request_id"] == (placement + "-remove" if removal else placement),
+                    "A ciklus elhelyezési és eltávolítási azonosítója eltér")
             require((row["pair"], row["condition"], row["run_id"], row["cycle"], row["operation"])
                     == (pair, condition, run_id, cycle, operation) and row["warmup"] is (cycle == 0)
                     and started <= utc(row["checked_utc"]) <= finished, "Hibás műveletsorrend")
@@ -133,6 +177,8 @@ def verify(directory, historical=False):
             require(previous_ns <= start <= enqueued <= end and start <= request_ns <= ack_ns <= ack_received <= end + 1
                     and 0 <= row["max_poll_interval_ms"] <= (end - start) / 1e6,
                     f"Hibás monoton időrend: {row['request_id']}")
+            require(endpoint_matches(series, row),
+                    f"A nyers állapotminták nem támasztják alá a végpontot: {row['request_id']}")
             previous_ns = end
             compare(row["observed_consistency_ms"], (end - start) / 1e6, "observed_consistency_ms")
             compare(row["mqtt_request_to_observer_ack_ms"], (ack_received - request_ns) / 1e6,
@@ -149,7 +195,7 @@ def verify(directory, historical=False):
     return {"status": "verified", "hashed_files": len(files), "application_runs": len(runs),
             "operations_including_warmup": len(rows), "measured_operations": measured,
             "paired_analysis_units": pairs, "source_hashes_match": not mismatches,
-            "different_current_files": mismatches, "raw_mqtt_records_match": True,
+            "different_current_files": mismatches, "raw_mqtt_records_match": True, "raw_endpoint_states_match": True,
             "statistics_reproduced": True}
 
 
