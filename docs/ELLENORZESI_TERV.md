@@ -78,3 +78,7 @@ A 2026. november 23-i ellenőrzött kiadás forrása f00f9f4c49c4a41819f22b6a9af
 A külön [mérési terv](MERESI_MODSZER.md) szüneteltetett és négyszeres sebességgel futó modell mellett vizsgálja a valódi MQTT-kezelőút válaszidejét. A sikeres kampány harminc futáspárban 720 mért műveletet tartalmaz; a statisztikai egység a futáspár. A meglévő bizonyítékot az `experiments.verify_campaign` újraszámolja. Ez statisztikai időmérés a helyi futtatási környezetben, nem fizikai autó validálása.
 
 Kapacitásvizsgálatnál a befejezett és várakozó autókat külön kell közölni. Az azonos determinisztikus mozgás ismétlése önmagában nem hoz független folyamatmintát. A funkcionális teszteket és a statisztikai mérést ezért külön bizonylatok támasztják alá.
+
+## November 26-i regresszióellenőrzés
+
+A QoS-szétválasztás és a megfigyelő állapotpillanatképének optimalizálása után 46/46 Python-teszt és 21/21 valódi MQTT/HTTP-integrációs próba (38 feltétel) sikerült. A nyugtázási terhelés a korábbi wildcard-feliratkozásnál időtúllépést okozott; a javítás nem változtatja meg a parkolási mozgásmodellt. A korábbi késleltetésmérés külön forrásverzióhoz tartozik, az ellenőrzés --historical módban újraszámolható. A javítás és az automatizált ellenőrzés AI-támogatással történt.
