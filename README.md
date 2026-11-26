@@ -11,7 +11,7 @@ Az önálló alkalmazás célja az áttekinthető mérnöki feladat és a magyar
 A mappában indított PowerShellből:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\inditas.ps1
+powershell -ExecutionPolicy Bypass -File .\inditas.ps1 -Paused
 ```
 
 Az alkalmazás HTTP-portja **8766**, MQTT-portja **19085**. Önálló telepítéshez a saját `.venv` környezet létrehozása szükséges.
@@ -21,7 +21,7 @@ Az alkalmazás HTTP-portja **8766**, MQTT-portja **19085**. Önálló telepíté
 ```powershell
 py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements-lock.txt
-powershell -ExecutionPolicy Bypass -File .\inditas.ps1
+powershell -ExecutionPolicy Bypass -File .\inditas.ps1 -Paused
 ```
 
 A [műszerfal](http://127.0.0.1:8766/) a szimulációt és az MQTT-n fogadott naplót mutatja. A szüneteltetett futás az **Indítás** gombbal folytatható. Az **Új futás** külön naplókönyvtárat hoz létre, és szüneteltetett kezdőállapotot ad.
@@ -104,7 +104,7 @@ Saját virtuális környezettel:
 
 A második parancs valódi MQTT/HTTP integrációt ellenőriz. A harmadikhoz külön Node.js szükséges a PATH-on; a felületi JavaScriptet minimális DOM-mal ellenőrzi, nem valódi böngészővel. A modellteszt és a működő hálózati adatút bizonyítása külön feladat. A részletes ellenőrzési esetek az [ellenőrzési tervben](docs/ELLENORZESI_TERV.md), a magyarázat és a háromperces bemutató a [védési útmutatóban](docs/VEDESI_UTMUTATO.md) található. A tényleges teszteredményt az adott futás kimenete, illetve – ha létrejött – a `results/verification.json` rögzíti; ez a leírás önmagában nem sikerigazolás.
 
-Playwright és Chromium mellett a `node tests/browser.cjs` valódi böngészős próbát indít. A `MINI_YARD_PYTHON` változóban megadható a virtuális környezet Pythonja. A teszt ideiglenes mappában fut saját HTTP- és MQTT-porttal.
+A valódi böngészős próba rögzített Playwright-verzióval futtatható: Node.js 22 vagy 24, majd a projekt gyökerében npm ci és npx playwright install chromium. A `node tests/browser.cjs` valódi böngészős próbát indít. A `MINI_YARD_PYTHON` változóban megadható a virtuális környezet Pythonja. A teszt ideiglenes mappában fut saját HTTP- és MQTT-porttal.
 
 A [mérési módszer](docs/MERESI_MODSZER.md) a kézi foglaltságkezelés MQTT-válaszidejét hasonlítja össze szüneteltetett és 4× sebességű futás mellett. A javított változat 30 alkalmazáspárjának eredménye a `results/mqtt-campaign-2026-11-12-r5/summary.json` fájlban van. A külön parkolási kampány azonos célhelyen hasonlítja össze a zavarmentes és gyalogosjel melletti modellidőt. Az átmeneti szenzorhibát és a telt parkolót külön esetként vizsgálja.
 
@@ -116,7 +116,7 @@ Reprodukálás és a meglévő bizonyíték újraellenőrzése:
 .\.venv\Scripts\python.exe -B -X utf8 -m experiments.parking_campaign --output results/parkolas-sajat
 ```
 
-Az új kampány saját könyvtárat és bizonylatot hoz létre. Korábbi forrásverzióhoz tartozó MQTT-kampánynál a `--historical` kapcsoló engedi a mért adatok újraellenőrzését, és jelzi a forráseltérést. A [videó útmutatója](tools/VIDEO_UTMUTATO.md) a valódi MQTT-állapotokból készülő grafikus bemutató újragenerálását is leírja.
+Az új kampány saját könyvtárat és bizonylatot hoz létre. Korábbi forrásverzióhoz tartozó MQTT-kampánynál a `--historical` kapcsoló engedi a mért adatok újraellenőrzését, és jelzi a forráseltérést. Friss Git-klónból az előző, archivált kampány ellenőrzéséhez előbb a beadási ZIP forras/results könyvtárából kell átmásolni a teljes kampánymappát. Enélkül új kampány futtatható, a régi mérés nem ellenőrizhető. A [videó útmutatója](tools/VIDEO_UTMUTATO.md) a valódi MQTT-állapotokból készülő grafikus bemutató újragenerálását is leírja.
 
 A kézi parkolófoglalás használata és a 2026. október 22-i ellenőrzés bizonyítékai a [fejlesztési jegyzetben](docs/KEZI_PARKOLOFOGLALAS.md) találhatók.
 

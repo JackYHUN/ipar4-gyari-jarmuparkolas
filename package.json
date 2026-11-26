@@ -1,0 +1,15 @@
+{
+  "name": "mini-yard-browser-tests",
+  "version": "1.0.0",
+  "private": true,
+  "devDependencies": {
+    "playwright": "1.65.1"
+  },
+  "scripts": {
+    "test": "node tests/frontend.cjs",
+    "test:browser": "node tests/browser.cjs"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

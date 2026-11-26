@@ -75,7 +75,13 @@ class Application:
         key = secrets.token_bytes(32)
         self.vehicle_bus = Bus(self.mqtt_port, self.run_id, "vehicle", ["commands/+", "service/heartbeat"], key)
         self.service_bus = Bus(self.mqtt_port, self.run_id, "parking", ["requests/parking", "requests/parking_setup", "events"], key)
-        self.observer_bus = Bus(self.mqtt_port, self.run_id, "observer", ["#"], key)
+        # Az aMQTT 0.11.3 a feliratkozói QoS alapján továbbíthat, ezért a
+        # sűrű minták külön QoS 0 szűrőt kapnak, nem egy QoS 1 wildcardot.
+        self.observer_bus = Bus(self.mqtt_port, self.run_id, "observer", [
+            ("world", 0), ("coordinator", 0), ("telemetry/+", 0),
+            ("events", 1), ("requests/+", 1), ("commands/+", 1),
+            ("service/heartbeat", 1),
+        ], key)
         # Observer subscribes first so the first model publication can also be recorded.
         for bus in (self.observer_bus, self.vehicle_bus, self.service_bus):
             self.buses.append(bus)
@@ -367,7 +373,7 @@ class Application:
         cache = {
             "run_id": self.run_id, "sim_time": self.observed_world.get("sim_time", 0),
             "paused": self.paused, "speed": self.speed, "connected": self._connected(now),
-            "ready": not self.error and fresh and all(clients.values()), "config": self.config,
+            "ready": not self.error and fresh and all(clients.values()), "config": dict(self.config),
             "clock": self._clock_snapshot(),
             "mqtt": {"port": self.mqtt_port, "published": sum(b.published for b in self.buses),
                      "received": self.observer_bus.received, "invalid": sum(b.invalid for b in self.buses),
@@ -375,12 +381,15 @@ class Application:
                      "heartbeat_age_s": age, "world_age_s": world_age, "coordinator_age_s": coordinator_age,
                      "fresh": fresh, "clients": clients},
             "world": self.observed_world, "coordinator": self.observed_coordinator,
-            "parking_setup": self.parking_setup, "parking_operations": self.setup_results,
+            "parking_setup": self.parking_setup, "parking_operations": dict(self.setup_results),
             "events": list(self.events), "messages": list(self.messages), "controls": dict(self.flags),
             "log_file": str(self.log_path.relative_to(self.root)), "error": self.error,
         }
+        # A megfigyelő rekordjai beolvasás után nem módosulnak; a változó
+        # tárolókhoz fent új dict/list készült. Így nem kell minden 10 ms-os
+        # ciklusban a teljes 120 rekordos naplóablakot mélymásolni.
         with self.lock:
-            self.state_cache = copy.deepcopy(cache)
+            self.state_cache = cache
 
     def _work(self):
         previous = time.perf_counter()
@@ -433,11 +442,14 @@ class Application:
             self.error = f"{type(error).__name__}: {error}"
             self.paused = True
             with self.lock:
-                self.state_cache.update(ready=False, paused=True, error=self.error)
+                self.state_cache = dict(self.state_cache, ready=False, paused=True, error=self.error)
 
     def state(self):
+        # A közzétett pillanatkép a következő frissítéskor lecserélődik,
+        # nem helyben módosul. A hívó továbbra is leválasztott másolatot kap.
         with self.lock:
-            return copy.deepcopy(self.state_cache)
+            snapshot = self.state_cache
+        return copy.deepcopy(snapshot)
 
     def export_source(self):
         # Capture the file and byte limit together, even if a reset follows.

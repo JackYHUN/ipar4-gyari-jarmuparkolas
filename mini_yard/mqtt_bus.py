@@ -32,7 +32,10 @@ class Bus:
         self._recent = {}
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2,
                                   client_id=f"mini-{secrets.token_hex(12)}", protocol=mqtt.MQTTv311)
-        self.subscriptions = subscriptions
+        # A megfigyelő nagy gyakoriságú mintái QoS 0-val, a vezérlési
+        # üzenetek QoS 1-gyel érkeznek. A régi str lista továbbra is QoS 1.
+        self.subscriptions = [(item, 1) if isinstance(item, str) else tuple(item)
+                              for item in subscriptions]
         self.client.on_connect = self._connect
         self.client.on_subscribe = self._subscribed
         self.client.on_disconnect = lambda *_: self.ready.clear()
@@ -41,7 +44,7 @@ class Bus:
 
     def _connect(self, client, userdata, flags, reason, properties):
         if reason == 0:
-            client.subscribe([(self.prefix + item, 1) for item in self.subscriptions])
+            client.subscribe([(self.prefix + item, qos) for item, qos in self.subscriptions])
 
     def _subscribed(self, client, userdata, mid, reasons, properties):
         if len(reasons) == len(self.subscriptions) and all(not reason.is_failure for reason in reasons):

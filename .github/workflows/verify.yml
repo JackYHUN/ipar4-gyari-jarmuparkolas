@@ -1,0 +1,36 @@
+name: Verify demonstrator
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: windows-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+      - run: python -m pip install -r requirements-lock.txt
+      - run: python -m pip check
+      - run: python -m unittest discover -s tests -v
+      - run: npm ci
+      - run: python -m tests.verify_frontend
+      - run: python -m tests.integration
+      - run: npx playwright install chromium
+      - run: node tests/browser.cjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: verification
+          path: |
+            results/verification.json
+            results/ui/design-v2/frontend-check.json
+          if-no-files-found: warn

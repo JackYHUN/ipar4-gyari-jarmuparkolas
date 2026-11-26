@@ -63,11 +63,15 @@ Kommunikációs és érzékelőhibánál a modell azonnal nullázza a sebessége
 | Megfelelt / nem felelt meg / nem hajtottuk végre | |
 | Korlátozás vagy eltérés | |
 
-## Aktuális ellenőrzési eredmény
+## Korábbi ellenőrzési eredmény
 
 A 2026. október 29-i különálló környezetben 36 egységteszt (29 modell, 4 broker, 3 méréskiértékelési teszt), 11 valódi MQTT/HTTP-integrációs eset 27 mért feltétellel és 31 felületi szerződésellenőrzés sikeres. A runtime-, teszt- és webforrásokat a `results/verification.json` azonosítja; a nyers MQTT-naplók az ott megadott evidence_directory alatt találhatók. A korábbi dátumú vizsgálatok történeti bizonyítékok, nem a mostani kód sikerigazolásai.
 
 A teljes állóidő, a kézi foglalás és felszabadítás, az ismételt kérések, a régi járműpéldány és az előző futás parancsainak kizárása is a tesztelt viselkedés része. A broker lezárásánál a háttérszál megszűnését és a listener bezárását is ellenőrzi az integráció. A JavaScript minimális DOM-tesztje külön Node.js futtatókörnyezetet igényel, és nem teljes böngészős teszt.
+
+## A beadási kiadás ellenőrzése
+
+A 2026. november 23-i ellenőrzött kiadás forrása f00f9f4c49c4a41819f22b6a9afbc88d04c25e6a. A helyi ellenőrzési eredmény 45 Python-egységteszt, 21 MQTT/HTTP-integrációs próba (38 feltétel), 32 felületi szerződésellenőrzés. A Chromium-próba három szélességet vizsgált. A beadási ZIP-ben a forras/results/verification.json és forras/results/ui/design-v2/frontend-check.json a részletes, forráslenyomattal ellátott bizonylat. Az új futás eredményét külön kell rögzíteni; a fenti adat nem új futás állítása.
 
 ## Kísérleti kiértékelés
 
