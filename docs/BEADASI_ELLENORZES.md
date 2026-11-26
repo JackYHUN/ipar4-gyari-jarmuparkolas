@@ -43,8 +43,8 @@ A helyi kéziratsablon és a publikáló–közvetítő–feliratkozó adatútr�
 | Működési videó | A beadási csomag MP4-fájlja és a video/ bizonyítékai |
 | Formai követelmények | Word- és PDF-fájl, ábrafeliratok, natív táblázatok, alternatív szövegek, forrásjegyzék |
 | Hozzáférhetőség | GitHub, beadási ZIP, telepítési útmutató |
-| Saját hallgatói munka | A hallgató tényleges munkanaplója és védése; automatizált teszt nem bizonyítja |
-| Témaválasztás és AI-segítség elfogadása | Oktatói visszaigazolás szükséges; a teljes aktuális pontozási útmutató nem áll rendelkezésre |
+| Saját hallgatói munka | A hallgató ténylegesen dokumentált tevékenysége; automatizált teszt nem bizonyítja |
+| Témaválasztás és AI-segítség elfogadása | A témát a hallgató közlése szerint jóváhagyták; az AI-szabályok és a teljes aktuális pontozási útmutató nem ismertek |
 
 ## Reprodukálás
 

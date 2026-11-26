@@ -74,7 +74,7 @@ A támogatott lépésköz 0,025–0,1 s, az életjel határideje 0,6–60 s. A k
 
 A kezelőfelületről gyalogos jelenléte, virtuális érzékelőhiba és kommunikációs hibamód kapcsolható. A kommunikációs hibamód szünetelteti a szívverés publikálását, a járműoldalon pedig figyelmen kívül hagyja a normál kiosztási parancsokat; a telemetria a megfigyeléshez továbbra is elérhető. A már parkoló autók kézi elhelyezése külön kezelői menedzsmentút, amely ebben a hibamódban is működik. Ez irányított hibainjektálás, nem teljes broker- vagy hálózatleállítás.
 
-A teljes fogadott MQTT-forgalom JSONL-fájlba kerül; a felületen csak a legutóbbi üzenetek és események látszanak. Az aktuális napló elérési útját a `/api/state` válasz `log_file` mezője jelzi. Exportok:
+A megfigyelő által elfogadott MQTT-üzenetek és a helyi kezelői rekordok JSONL-fájlba kerülnek; a felületen csak a legutóbbi üzenetek és események látszanak. Az aktuális napló elérési útját a `/api/state` válasz `log_file` mezője jelzi. Exportok:
 
 - `/api/export?kind=messages`: fogadott MQTT-üzenetek;
 - `/api/export?kind=telemetry`: járműminták CSV-ben;
