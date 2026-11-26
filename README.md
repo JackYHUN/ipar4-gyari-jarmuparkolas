@@ -4,7 +4,7 @@ A kódtár a járműmodellt, a valódi helyi MQTT-adatutat, a műszerfalat és e
 
 Egy szimulált autó a gyártósor kijáratától egy központilag lefoglalt parkolóhelyre jut. Az útját zebra keresztezi: virtuális érzékelés alapján megáll, majd a gyalogos távozása után továbbhalad. A járműmodell, a parkolókezelő és a megjelenítést kiszolgáló megfigyelő valódi, helyi MQTT-közvetítőn keresztül kommunikál.
 
-Az önálló alkalmazás célja az áttekinthető mérnöki feladat és a magyarázható működés. AI segítségével készült oktatási demonstrátor; a fájlok vagy a commitok megléte önmagában nem bizonyít önálló hallgatói munkát. A tényleges saját döntéseket és méréseket a [munkanaplóban](docs/SAJAT_MUNKA_NAPLO.md) lehet rögzíteni.
+A demonstrátor a helyfoglalás nyomon követésére, a megállási okok visszakeresésére és a parkolási idő vizsgálatára szolgál. A kód, a dokumentáció és az automatikus vizsgálatok AI-közreműködéssel készültek. A [munkanapló](docs/SAJAT_MUNKA_NAPLO.md) a fejlesztési előzmények mellett kitöltendő saját mérési jegyzőkönyvet is tartalmaz; önálló hallgatói teljesítményt csak ténylegesen elvégzett tevékenység igazolhat.
 
 ## Indítás Windows alatt
 

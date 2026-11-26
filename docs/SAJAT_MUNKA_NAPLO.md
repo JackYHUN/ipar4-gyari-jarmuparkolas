@@ -27,3 +27,27 @@ A hat páros kiegészítő kampányban 24 új művelet került elemzésre. Az á
 ## Személyes hozzájárulás és a felhasznált segítség
 
 A témaválasztás oktatói jóváhagyása a hallgató közlése szerint megtörtént. A jelen napló nem igazol önállóan elvégzett hallgatói implementációt vagy mérést. A személyesen elvégzett további tevékenységeket azok megtörténte után, valós dátummal és bizonyítékkal lehet kiegészíteni.
+
+## Kitöltendő saját vizsgálati jegyzőkönyv
+
+Az alábbi táblázat üres munkalap, nem elvégzett mérés. A futás előtt rögzítsd a hipotézist és az azonos feltételeket, utána a tényleges megfigyeléseket. Az exportált fájlokat őrizd meg.
+
+Dátum, használt Git-commit, konfiguráció:
+
+Hipotézis, rögzített feltételek, gyalogosjel időzítése:
+
+| Mért adat | Zavarmentes futás | Gyalogosjeles futás |
+| --- | --- | --- |
+| Futásazonosító | | |
+| Kiosztott parkolóhely | | |
+| Átadás modellideje (s) | | |
+| Nyugtázott parkolás modellideje (s) | | |
+| Teljes parkolási idő (s) | | |
+| Gyalogos miatti állásidő (s) | | |
+| MQTT/CSV-export elérési helye | | |
+
+Saját megfigyelés és eltérés a hipotézistől:
+
+Melyik következtetés támasztható alá a naplóval, és mi maradt bizonytalan?
+
+Az esetleges sikertelen futás és a ténylegesen igénybe vett segítség:
