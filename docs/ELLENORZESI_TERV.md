@@ -82,3 +82,5 @@ Kapacitásvizsgálatnál a befejezett és várakozó autókat külön kell köz�
 ## November 26-i regresszióellenőrzés
 
 A QoS-szétválasztás és a megfigyelő állapotpillanatképének optimalizálása után 46/46 Python-teszt és 21/21 valódi MQTT/HTTP-integrációs próba (38 feltétel) sikerült. A nyugtázási terhelés a korábbi wildcard-feliratkozásnál időtúllépést okozott; a javítás nem változtatja meg a parkolási mozgásmodellt. A korábbi késleltetésmérés külön forrásverzióhoz tartozik, az ellenőrzés --historical módban újraszámolható. A javítás és az automatizált ellenőrzés AI-támogatással történt.
+
+Az új mérési módszerváltozat 30 teljes párja és 120 mért művelete ellenőrzött; a részletes, előre rögzített tervet és nyers rekordokat a beadási csomag tartalmazza. A régi 720 művelet nem lett az új mintába összevonva. A 5d2e024 kiadás tiszta Windows GitHub Actions ellenőrzése sikeres: https://github.com/JackYHUN/ipar4-gyari-jarmuparkolas/actions/runs/45902454101 .

@@ -27,7 +27,7 @@ from mini_yard.runtime import Application
 
 
 ROOT = Path(__file__).resolve().parents[1]
-POLL_S = 0.002
+POLL_S = 0.020
 TIMEOUT_S = 5.0
 
 
@@ -124,7 +124,7 @@ def wait_ready(app, running):
         state = app.state()
         if state.get("error"):
             raise RuntimeError(state["error"])
-        if (state.get("connected") and state.get("world") and state.get("coordinator")
+        if (state.get("ready") and state.get("connected") and state.get("world") and state.get("coordinator")
                 and (not running or state.get("sim_time", 0) >= .5)):
             return state
         time.sleep(POLL_S)
@@ -152,7 +152,7 @@ def measure_operation(app, pair, condition, cycle, operation, placement_id, warm
         polls += 1
         if state.get("error"):
             raise RuntimeError(state["error"])
-        if consistent(state, request_id, placement_id, operation):
+        if state.get("ready") and state.get("connected") and consistent(state, request_id, placement_id, operation):
             # The live widget intentionally retains only 120 records. A slow
             # operation may outlive that window under telemetry load. Read the
             # complete, line-buffered evidence AFTER stopping the timing clock.
@@ -222,7 +222,7 @@ def run_condition(pair, condition, cycles, directory, config, output):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--pairs", type=int, default=30)
-    parser.add_argument("--cycles", type=int, default=6)
+    parser.add_argument("--cycles", type=int, default=1)
     parser.add_argument("--seed", type=int, default=20261029)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
@@ -253,8 +253,9 @@ def main():
             "pair_count": args.pairs, "cycles_per_condition": args.cycles,
             "warmup_cycles_per_condition": 1, "operations_per_cycle": ["spawn_P08", "remove_P08"],
             "count_rationale": "30 independently reinitialized pairs is a bounded exploratory campaign; no guaranteed power or precision is asserted",
-            "failure_rule": "5 s timeout or invalid state aborts entire campaign; do not silently drop failed operations",
+            "failure_rule": "5 s timeout, rejected control, invalid or completed-load state aborts entire campaign; do not silently drop failed operations",
             "poll_interval_requested_s": POLL_S, "timeout_s": TIMEOUT_S,
+            "method_revision": "20 ms requested polling and short blocks; require fresh connected state at endpoint",
             "startup": "excluded; wait for all observed state and heartbeat; one spawn/remove warmup cycle",
             "evidence_lookup": "full durable MQTT JSONL after timing endpoint; never the 120-record live widget cache",
             "seed": args.seed, "order": order, "config": config,

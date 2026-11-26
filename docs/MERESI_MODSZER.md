@@ -222,3 +222,7 @@ A javított mérőeszköz az időmérés lezárása után a teljes, tartós MQTT
 keres. A megszakadt próbát `failure.json` és nyers naplói jelölik; egyetlen
 részmérését sem egyesítettük a sikeres kampánnyal. A sikeres kampányhoz új,
 előre kiírt terv és a javított mérőeszköz külön forráslenyomata tartozik.
+
+## 2026. november 26. – új mérési módszerváltozat
+
+A korábbi bekezdések történeti kampányokat írnak le. A november 26-i r6 és r7 próba megszakadt; az elsőnél a parkolás befejeződött a terhelési ablakban, a másodiknál elavult az adatút. A javított mérőeszköz a végponton friss, kapcsolt állapotot követel meg, a kért lekérdezési szünet 20 ms. Előre rögzített 30 pár, feltételenként egy bemelegítő és egy mért elhelyezési/eltávolítási ciklus: 120 mért és 120 bemelegítő művelet. A teljes kampány sikeres, a nyers rekordok és az újraszámítás egyeznek (183 fájl). Mediánok: 88,01 és 466,22 ms; átlagos páros blokkmedián-különbség 353,15 ms, 95%-os bootstrap-intervallum 310,29–391,15 ms. Ez nem igazol kontrollált sebességváltozást a korábbi kampányhoz képest. Új mérés: python -m experiments.latency_campaign; ellenőrzés: python -m experiments.verify_campaign results/mqtt-campaign-2026-11-26-r8.

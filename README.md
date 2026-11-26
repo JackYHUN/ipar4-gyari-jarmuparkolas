@@ -106,13 +106,13 @@ A második parancs valódi MQTT/HTTP integrációt ellenőriz. A harmadikhoz kü
 
 A valódi böngészős próba rögzített Playwright-verzióval futtatható: Node.js 22 vagy 24, majd a projekt gyökerében npm ci és npx playwright install chromium. A `node tests/browser.cjs` valódi böngészős próbát indít. A `MINI_YARD_PYTHON` változóban megadható a virtuális környezet Pythonja. A teszt ideiglenes mappában fut saját HTTP- és MQTT-porttal.
 
-A [mérési módszer](docs/MERESI_MODSZER.md) a kézi foglaltságkezelés MQTT-válaszidejét hasonlítja össze szüneteltetett és 4× sebességű futás mellett. A november 12-i, korábbi forrásverzió 30 alkalmazáspárjának eredménye a `results/mqtt-campaign-2026-11-12-r5/summary.json` fájlban van. A külön parkolási kampány azonos célhelyen hasonlítja össze a zavarmentes és gyalogosjel melletti modellidőt. Az átmeneti szenzorhibát és a telt parkolót külön esetként vizsgálja.
+A [mérési módszer](docs/MERESI_MODSZER.md) a kézi foglaltságkezelés MQTT-válaszidejét hasonlítja össze szüneteltetett és 4× sebességű futás mellett. A javított mérőprogram 30 alkalmazáspárjának, 120 elemzett műveletének eredménye a `results/mqtt-campaign-2026-11-26-r8/summary.json` fájlban van. A régebbi 720 művelet külön, történeti kampány. Az új feltételek rövidebb blokkokat és 20 ms-os kért lekérdezési szünetet tartalmaznak. A külön parkolási kampány azonos célhelyen hasonlítja össze a zavarmentes és gyalogosjel melletti modellidőt. Az átmeneti szenzorhibát és a telt parkolót külön esetként vizsgálja.
 
 Reprodukálás és a meglévő bizonyíték újraellenőrzése:
 
 ```powershell
 .\.venv\Scripts\python.exe -B -X utf8 -m experiments.latency_campaign
-.\.venv\Scripts\python.exe -B -X utf8 -m experiments.verify_campaign results/mqtt-campaign-2026-11-12-r5 --historical
+.\.venv\Scripts\python.exe -B -X utf8 -m experiments.verify_campaign results/mqtt-campaign-2026-11-26-r8
 .\.venv\Scripts\python.exe -B -X utf8 -m experiments.parking_campaign --output results/parkolas-sajat
 ```
 
