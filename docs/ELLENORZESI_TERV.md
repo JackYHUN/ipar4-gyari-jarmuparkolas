@@ -75,7 +75,7 @@ A 2026. november 23-i ellenőrzött kiadás forrása f00f9f4c49c4a41819f22b6a9af
 
 ## Kísérleti kiértékelés
 
-A külön [mérési terv](MERESI_MODSZER.md) szüneteltetett és négyszeres sebességgel futó modell mellett vizsgálja a valódi MQTT-kezelőút válaszidejét. A november 12-i történeti kampány harminc futáspárban 720 mért műveletet tartalmaz; a statisztikai egység a futáspár. A meglévő bizonyítékot az `experiments.verify_campaign` újraszámolja. Ez statisztikai időmérés a helyi futtatási környezetben, nem fizikai autó validálása.
+A külön [mérési terv](MERESI_MODSZER.md) szüneteltetett és négyszeres sebességgel futó modell mellett vizsgálja a valódi MQTT-kezelőút válaszidejét. A november 26-i fő kampány 30 futáspárban 120 mért és 120 bemelegítő műveletet tartalmaz. A hatpáros kiegészítő kampány 24 mért műveletet rögzít; a november 12-i 720 mért művelet külön történeti bizonyíték. A statisztikai egység a futáspár, a különböző módszerű kampányok mintái nem vonhatók össze. A meglévő bizonyítékot az `experiments.verify_campaign` újraszámolja. Ez statisztikai időmérés a helyi futtatási környezetben, nem fizikai autó validálása.
 
 Kapacitásvizsgálatnál a befejezett és várakozó autókat külön kell közölni. Az azonos determinisztikus mozgás ismétlése önmagában nem hoz független folyamatmintát. A funkcionális teszteket és a statisztikai mérést ezért külön bizonylatok támasztják alá.
 

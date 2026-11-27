@@ -69,3 +69,8 @@ A tényleges, aktuális futási eredmények és esetleges eltérések a beadási
 **Mérnöki érték.** A foglalási azonosítók és a napló összekapcsolják a gyártósori átadást a parkolóhely kiosztásával és a parkolás nyugtázásával. Így visszakereshető, hogy egy jármű mikor és miért várakozott, illetve melyik helyre került. A párosított modellpróbákban a gyalogosjel átlagosan 6,08 modellmásodperc többletet eredményezett; az okonkénti állásidő és a fázisidők segítik a folyamat elemzését. Ezek helyi modellből származó mérnöki mutatók, nem igazolt üzemi költség- vagy időmegtakarítások.
 
 A november 27-i kicsomagolt kiadás újraellenőrzésében a 21 MQTT/HTTP-integrációs próba (38 feltétel) és a Chromium-próba sikeres volt. Mind a 31 archivált modellpróba újra előállítható és az eredeti összesítéssel egyezett. A videó és a hozzá tartozó bizonyítékok fájllenyomatai szintén egyeztek. A jelentés és a mérési adatok változatlanok. A személyes hallgatói munka és az AI-segítség tantárgyi elfogadhatósága ettől független kérdés.
+
+
+## Időbeli bizonyíték és a vizsgálat határa
+
+A nyilvános Git-előzmény első modellpillanatképe a 2026. október 20-i 5d5a0ac commit; a README már meglévő helyi modell közzétételének nevezi. Az október 22-i e769884 commit a megállási időt, az október 23-i ccb2c1e az MQTT-műszerfalat dokumentálja. A november 12-i 8e1fed8 az önálló parkolás továbbfejlesztését, a november 26-i 6a30094 a módosított mérési módszert rögzíti. Ezek a ténylegesen ellenőrizhető közzétételi előzmények. A kampányok előre rögzített terve nem bizonyítja, hogy az eredeti mérnöki mutató és kiindulási érték minden fejlesztést megelőzően készült; erre nincs független igazolás. A személyes hallgatói tevékenység és a tantárgyi AI-szabályok továbbra is külön tisztázandók.

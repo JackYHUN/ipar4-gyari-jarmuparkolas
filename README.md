@@ -122,7 +122,9 @@ A kézi parkolófoglalás használata és a 2026. október 22-i ellenőrzés biz
 
 A `results/` könyvtár futásnaplói, tesztbizonylatai és képernyőképei helyben keletkeznek, nem részei a követett forráscsomagnak. A dokumentáció ezek relatív kimeneti helyeit és korábbi ellenőrzések azonosítóit is tartalmazza; saját futtatáskor új bizonylat készül.
 
-## Legutóbbi igazolt ellenőrzés
+## Ellenőrzési előzmények
+
+A [GitHub Actions aktuális futásai](https://github.com/JackYHUN/ipar4-gyari-jarmuparkolas/actions/workflows/verify.yml) az adott commit ellenőrzési állapotát mutatják. A 2026. november 27-i [6fd6590 ellenőrzés](https://github.com/JackYHUN/ipar4-gyari-jarmuparkolas/actions/runs/45912264860) sikeresen befejeződött. Ugyanezen a forráson az ismételt helyi ellenőrzésben 48 Python-teszt és 32 frontend-ellenőrzés sikerült. Az alábbi korábbi futás a mérési verifikátor változtatásának történeti bizonyítéka.
 
 A [dc92781 forrásverzió](https://github.com/JackYHUN/ipar4-gyari-jarmuparkolas/commit/dc92781dd85050128fa122c267ab2c4c29c6fcf6) helyi ellenőrzésében 48 Python-teszt sikerült. A hozzá tartozó [GitHub Actions futás](https://github.com/JackYHUN/ipar4-gyari-jarmuparkolas/actions/runs/45906671291) sikeres. A mérési verifikátor a teljes forráslenyomat-jegyzéket, a nyers kérés/nyugta rekordokat és a két megfigyelt végponti állapotot is ellenőrzi. Az eredeti három kampány 1128 művelete (a bemelegítéssel együtt) megfelelt. A hiányos forrásjegyzéket és a hiányzó koordinátormintákat újraszámolt fájllenyomatok mellett is elutasította. Ez nem kriptográfiai eredetigazolás; a forrás, a napló és az újraszámított eredmények egyezését ellenőrzi.
 
